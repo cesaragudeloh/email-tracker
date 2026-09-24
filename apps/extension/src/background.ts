@@ -1,2 +1,7 @@
-// Punto de entrada del service worker MV3, sin tareas de producto todavía.
-console.info('Email Tracker background ready');
+import { createActivationStorage } from './activation/storage.js';
+
+const storage = createActivationStorage();
+// Se ejecuta en cada inicio del worker; reutiliza el UUID y restringe el acceso al token.
+void storage.getInstallationId().catch(() => {
+  console.warn(JSON.stringify({ event: 'activation_storage_unavailable' }));
+});

@@ -1,2 +1,1 @@
-// Workspace inicial; la funcionalidad se añadirá en futuros milestones.
-export {};
+export * from './activation.js';

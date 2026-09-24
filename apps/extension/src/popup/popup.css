@@ -16,7 +16,7 @@
 }
 
 body {
-  width: 300px;
+  width: 340px;
   margin: 0;
 }
 
@@ -51,4 +51,57 @@ dd {
   font-size: 15px;
   font-weight: 600;
   line-height: 1.5;
+}
+
+form {
+  margin-top: 20px;
+}
+label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+input,
+button {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font: inherit;
+}
+input {
+  border: 1px solid #94a3b8;
+  background: #fff;
+  color: #1e293b;
+}
+button {
+  margin-top: 12px;
+  border: 0;
+  color: #fff;
+  background: #1d4ed8;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid #1d4ed8;
+  outline-offset: 3px;
+}
+#activation-message {
+  color: #991b1b;
+  font-size: 13px;
+}
+#activation-message:empty {
+  display: none;
+}
+#activation-status[data-activated='true'] {
+  color: #166534;
+}
+.installation {
+  margin-bottom: 0;
+  color: #64748b;
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }

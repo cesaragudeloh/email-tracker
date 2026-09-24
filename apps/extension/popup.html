@@ -11,8 +11,25 @@
       <h1>Email Tracker</h1>
       <dl class="status">
         <dt>Status:</dt>
-        <dd id="activation-status"></dd>
+        <dd id="activation-status" aria-live="polite">Not activated</dd>
       </dl>
+      <form id="activation-form" novalidate>
+        <label for="activation-code">Activation code:</label>
+        <input
+          id="activation-code"
+          name="activationCode"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          maxlength="256"
+          required
+        />
+        <button id="activate-button" type="submit" disabled>Activate</button>
+      </form>
+      <p id="activation-message" role="alert"></p>
+      <p class="installation">
+        Installation: <span id="installation-id"></span>
+      </p>
     </main>
   </body>
 </html>

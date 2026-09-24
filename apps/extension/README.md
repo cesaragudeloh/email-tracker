@@ -1,106 +1,61 @@
-# Email Tracker — extensión Chromium base
+# Email Tracker — activación de la extensión
 
-Milestone 2: una sola extensión Manifest V3 para Google Chrome y Microsoft Edge.
-El popup muestra `Email Tracker` y `Status: Not activated`. El content script
-únicamente escribe `Email Tracker extension active` en la consola de los tres
-sitios declarados. El service worker únicamente registra su inicio.
-
-No hay activación real, adaptadores de correo, tracking ni llamadas a servicios.
-No se solicitan permisos de APIs ni `host_permissions` adicionales: los patrones
-de `content_scripts.matches` limitan dónde se ejecuta el script. El navegador
-puede mostrar el acceso a esos sitios durante la instalación.
+Una base Manifest V3 para Chrome y Edge, con TypeScript, Vite, HTML y CSS.
+El popup muestra el estado local de autorización, solicita el código si no existe
+un JWT vigente y guarda la respuesta de `POST /api/activate` en `chrome.storage.local`.
+No almacena el código, no muestra el JWT y no implementa tracking.
 
 ## Estructura
 
-```text
-public/manifest.json    Manifiesto copiado a dist/ por Vite
-popup.html              Entrada HTML del popup
-src/content.ts          Script común a los tres sitios
-src/background.ts       Service worker de tipo module
-src/popup/popup.ts       Presentación del estado fijo
-src/popup/popup.css      Estilos del popup
-vite.config.ts          Compilación del popup, worker y content script
-```
+- `src/activation/storage.ts`: UUID persistente, bloqueo entre contextos y token local.
+- `src/activation/activationService.ts`: estado y coordinación de activación.
+- `src/api/client.ts`: HTTP, validación de respuestas y errores seguros.
+- `src/config.ts`: URL central del backend.
+- `src/popup/`: formulario, estado y estilos.
+- `src/background.ts`: inicialización del almacenamiento al iniciar el worker.
+- `src/content.ts`: solo registra `Email Tracker extension active` en los tres hosts.
+- `public/manifest.json`: base del manifiesto; Vite añade el permiso del host configurado.
 
-El HTML está en la raíz del workspace para generar `dist/popup.html` directamente.
-No se añade configuración de entornos hasta que exista algo que configurar.
+## Compilar
 
-## Compilar y verificar
-
-Con Node.js 24 y npm 11, desde la raíz del monorepo:
+Desde la raíz del monorepo:
 
 ```sh
 npm ci
-npm run build --workspace=@email-tracker/extension
+npm run build
 npm run lint
 npm test
 npm run format:check
 ```
 
-TypeScript comprueba los tipos en modo strict sin emitir archivos; Vite genera
-el paquete instalable. La primera compilación limpia `dist/`, copia el manifiesto
-y genera el popup y el worker. La segunda añade `content.js` como IIFE autónoma,
-sin imports de módulos, conservando el resto de los archivos.
+El paquete compartido debe compilarse antes de compilar este workspace aisladamente.
+`dist/` contiene manifiesto, popup, JS/CSS, worker, content script y los chunks
+locales que Vite genere. Se carga la carpeta completa. No se necesita servidor Vite.
 
-```text
-dist/
-├── manifest.json
-├── popup.html
-├── popup.js
-├── assets/popup-<hash>.css
-├── content.js
-└── background.js
-```
+Copia `.env.example` a `.env.production.local` en este workspace y define
+`VITE_ACTIVATION_API_URL` con la URL HTTPS pública de API Gateway cuando exista.
+Sin URL configurada, el build de producción sigue siendo instalable pero la
+activación responde con un mensaje de servicio no disponible.
 
-Todos los recursos son locales; no hace falta servidor de desarrollo.
-No hay lógica de negocio que justifique pruebas unitarias en este milestone;
-Vitest mantiene la configuración raíz y puede terminar sin encontrar tests.
-No se utilizan pruebas E2E. La carga real se verifica manualmente.
+Para un backend local que ya esté disponible, `npm run build:development --workspace=@email-tracker/extension` usa `http://localhost:3000` por defecto.
+El proyecto no incluye servidor local de activación en este milestone.
 
-## Validación manual en Google Chrome
+## Probar manualmente
 
-1. Ejecuta el build indicado arriba.
-2. Abre `chrome://extensions`.
-3. Activa **Developer mode** (Modo de desarrollador).
-4. Pulsa **Load unpacked** (Cargar descomprimida).
-5. Selecciona `apps/extension/dist`, no la carpeta fuente. En este proyecto bajo
-   Windows, la ruta es `C:\Projects\email-tracker\apps\extension\dist`.
-6. Comprueba que aparece **Email Tracker**, está habilitada y no muestra errores.
-7. En el menú de extensiones de la barra de herramientas, abre **Email Tracker**;
-   opcionalmente fíjala para acceder a su icono directamente.
-8. Comprueba que el popup muestra **Email Tracker**, **Status:** y **Not activated**,
-   con estilos aplicados.
-9. Abre Gmail Web en `https://mail.google.com/` e inicia sesión si hace falta.
-10. Abre DevTools con F12 o Ctrl+Shift+I, selecciona **Console** y recarga Gmail.
-    Comprueba el mensaje `Email Tracker extension active`. Mantén habilitado el
-    nivel **Info** y desactiva filtros de texto o de contexto que oculten el log.
-11. Repite la comprobación en `https://outlook.office.com/` y
-    `https://outlook.live.com/` con una sesión disponible. Si el proveedor redirige
-    a otro dominio, el script no se ejecutará allí: el alcance son los tres hosts
-    solicitados, sin ampliar permisos.
-12. En `chrome://extensions`, inspecciona el enlace del service worker de la
-    extensión. No debe haber errores. Es normal que quede inactivo al no tener
-    tareas pendientes; al iniciarse registra `Email Tracker background ready`.
+1. Compila. Abre `chrome://extensions` o `edge://extensions`.
+2. Activa **Developer mode** → **Load unpacked** → selecciona `apps/extension/dist`.
+3. Abre **Email Tracker** desde el menú de extensiones.
+4. Verifica **Status: Not activated** y un UUID que no cambia al reabrir.
+5. Un campo vacío debe mostrar **Enter a valid activation code**.
+6. Con backend desplegado y una licencia insertada, introduce su código y pulsa
+   **Activate**. Debe mostrar **Status: Activated**, sin exponer el token.
+7. Cierra y abre de nuevo para comprobar persistencia. La expiración se revisa
+   al abrir, recuperar foco y periódicamente mientras el popup está abierto.
+8. Después de cada build, recarga la extensión y las pestañas de correo.
 
-## Validación manual en Microsoft Edge
+El estado del popup es informativo; el backend debe validar los JWT para autorizar
+futuras funcionalidades. Los tokens se restringen a contextos confiables de la
+extensión. No existe activación offline ni bypass de desarrollo.
 
-1. Usa exactamente el mismo `apps/extension/dist` generado anteriormente.
-2. Abre `edge://extensions`.
-3. Activa **Developer mode** (Modo de desarrollador).
-4. Pulsa **Load unpacked** (Cargar descomprimida).
-5. Selecciona `apps/extension/dist` (en Windows:
-   `C:\Projects\email-tracker\apps\extension\dist`).
-6. Comprueba que **Email Tracker** aparece habilitada y sin errores.
-7. Abre **Email Tracker** desde el menú de extensiones de la barra de herramientas.
-8. Comprueba **Email Tracker**, **Status:** y **Not activated** en el popup.
-9. Abre `https://mail.google.com/`, abre DevTools → **Console** y recarga la página.
-   Debe aparecer `Email Tracker extension active`; habilita **Info** y elimina
-   filtros si no lo ves.
-10. Repite en los dos hosts de Outlook e inspecciona el service worker desde
-    `edge://extensions`, con las mismas consideraciones que en Chrome.
-
-Después de cada cambio, vuelve a compilar, pulsa **Reload** (Recargar) en la tarjeta
-de la extensión y recarga las pestañas de correo ya abiertas.
-
-Referencias oficiales: [carga local en Chrome](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world)
-y [carga local en Edge](https://learn.microsoft.com/en-us/microsoft-edge/extensions-chromium/getting-started/extension-sideloading).
+Consulta [la documentación raíz](../../README.md) para crear licencias, variables,
+diseño DynamoDB, límites de revocación y comandos de deployment con autorización.

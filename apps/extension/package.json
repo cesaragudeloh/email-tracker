@@ -4,9 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && vite build && vite build --mode content"
+    "build": "tsc -p tsconfig.json && vite build && vite build --mode content",
+    "build:development": "tsc -p tsconfig.json && vite build --mode development && vite build --mode content"
   },
   "devDependencies": {
-    "vite": "^8.3.1"
+    "vite": "^8.3.1",
+    "@types/chrome": "^0.1.0"
+  },
+  "dependencies": {
+    "@email-tracker/shared": "0.0.0",
+    "jose": "^6.0.0"
   }
 }

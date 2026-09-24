@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Email Tracker",
   "version": "0.0.0",
-  "description": "Base de Email Tracker para Chrome y Edge.",
+  "description": "Email Tracker con activaci\u00f3n por licencia para Chrome y Edge.",
   "action": {
     "default_title": "Email Tracker",
     "default_popup": "popup.html"
@@ -21,5 +21,6 @@
       "js": ["content.js"],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "permissions": ["storage"]
 }

@@ -5,7 +5,7 @@
     "moduleResolution": "Bundler",
     "noEmit": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client", "node"]
+    "types": ["vite/client", "node", "chrome"]
   },
   "include": ["src/**/*.ts", "vite.config.ts"],
   "exclude": [

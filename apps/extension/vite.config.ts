@@ -1,5 +1,7 @@
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vite';
+import { readFileSync } from 'node:fs';
+import { defineConfig, loadEnv } from 'vite';
+import { resolveApiBaseUrl } from './src/config.js';
 
 const extensionRoot = fileURLToPath(new URL('.', import.meta.url));
 
@@ -26,6 +28,29 @@ export default defineConfig(({ mode }) => {
   return {
     root: extensionRoot,
     base: './',
+    publicDir: false,
+    plugins: [
+      {
+        name: 'activation-manifest',
+        generateBundle() {
+          const env = loadEnv(mode, extensionRoot, 'VITE_');
+          const apiUrl = resolveApiBaseUrl(mode, env.VITE_ACTIVATION_API_URL);
+          const manifest = JSON.parse(
+            readFileSync(
+              new URL('./public/manifest.json', import.meta.url),
+              'utf8',
+            ),
+          );
+          if (apiUrl)
+            manifest.host_permissions = [new URL(apiUrl).origin + '/*'];
+          this.emitFile({
+            type: 'asset',
+            fileName: 'manifest.json',
+            source: JSON.stringify(manifest, null, 2),
+          });
+        },
+      },
+    ],
     build: {
       outDir: 'dist',
       emptyOutDir: true,

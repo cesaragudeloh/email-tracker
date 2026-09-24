@@ -1,2 +1,7 @@
-// Workspace inicial; la funcionalidad se añadirá en futuros milestones.
-export {};
+import { App } from 'aws-cdk-lib';
+import { ActivationStack } from './activationStack.js';
+
+const app = new App();
+new ActivationStack(app, 'EmailTrackerActivation', {
+  jwtTtlSeconds: Number(app.node.tryGetContext('jwtTtlSeconds') ?? 86400),
+});

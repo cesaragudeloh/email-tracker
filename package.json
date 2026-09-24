@@ -20,7 +20,8 @@
     "test": "vitest run",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "license:create": "npm run license:create --workspace=@email-tracker/tracking-api --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
