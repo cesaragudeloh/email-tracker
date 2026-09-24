@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Email Tracker",
+  "version": "0.0.0",
+  "description": "Base de Email Tracker para Chrome y Edge.",
+  "action": {
+    "default_title": "Email Tracker",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mail.google.com/*",
+        "https://outlook.office.com/*",
+        "https://outlook.live.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
