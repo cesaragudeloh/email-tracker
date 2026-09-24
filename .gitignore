@@ -1,0 +1,39 @@
+# Node.js y logs
+node_modules/
+.npm/
+*.log
+
+# TypeScript y compilación
+dist/
+build/
+*.tsbuildinfo
+coverage/
+.vite/
+.cache/
+
+# AWS CDK
+cdk.out/
+
+# Paquetes y claves de extensiones Chromium
+*.crx
+*.pem
+*.zip
+
+# Variables de entorno locales
+.env
+.env.*
+!.env.example
+
+# Temporales de sistema operativo e IDE
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
