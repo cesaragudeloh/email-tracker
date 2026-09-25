@@ -7,10 +7,12 @@ import {
   gmailSelectors,
   isGmailCompose,
 } from './gmailSelectors.js';
+import { GmailTrackingControls } from './GmailTrackingControls.js';
 
 export class GmailAdapter implements EmailProviderAdapter {
   private observer?: MutationObserver;
   private readonly detected = new WeakSet<HTMLElement>();
+  private readonly trackingControls = new GmailTrackingControls();
 
   constructor(
     private readonly document: Document,
@@ -77,10 +79,11 @@ export class GmailAdapter implements EmailProviderAdapter {
       if (!this.observer) return;
       if (
         !dialog.isConnected ||
-        this.detected.has(dialog) ||
-        !isGmailCompose(dialog)
+        (!this.detected.has(dialog) && !isGmailCompose(dialog))
       )
         continue;
+      this.trackingControls.ensureAttached(dialog);
+      if (this.detected.has(dialog)) continue;
       this.detected.add(dialog);
       try {
         this.onComposeDetected(dialog);

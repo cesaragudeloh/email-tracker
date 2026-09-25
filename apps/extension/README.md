@@ -1,4 +1,4 @@
-# Email Tracker — activación y detección de compose en Gmail
+# Email Tracker — activación y control Track email en Gmail
 
 Una base Manifest V3 para Chrome y Edge, con TypeScript, Vite, HTML y CSS.
 El popup muestra el estado local de autorización, solicita el código si no existe
@@ -17,6 +17,8 @@ No almacena el código, no muestra el JWT y no implementa tracking.
 - `src/providers/EmailProviderAdapter.ts`: contrato `canHandle`, `start`, `stop` y callback de detección.
 - `src/providers/selectProvider.ts`: selecciona Gmail por HTTPS y host exacto; otros sitios quedan sin adapter.
 - `src/providers/gmail/`: observer y estrategias DOM centralizadas de Gmail.
+- `src/providers/gmail/GmailTrackingControls.ts`: inserción y estado temporal por compose.
+- `src/ui/TrackingToggle.ts` y `.css`: checkbox accesible y estilos encapsulados.
 - `public/manifest.json`: base del manifiesto; Vite añade el permiso del host configurado.
 
 ## Compilar
@@ -63,21 +65,40 @@ extensión. No existe activación offline ni bypass de desarrollo.
 Consulta [la documentación raíz](../../README.md) para crear licencias, variables,
 diseño DynamoDB, límites de revocación y comandos de deployment con autorización.
 
-## Milestone 4: GmailAdapter
+## Milestone 5: GmailAdapter y Track email
 
-La detección funciona con estado `Activated` o `Not activated`. Solo notifica
-ventanas de composición; no modifica el DOM, el cuerpo ni ningún correo, no
-intercepta Send, no extrae destinatarios y no llama al backend. Outlook mantiene
-el mensaje inicial del content script, sin adapter.
+La detección y el control visual funcionan con estado `Activated` o `Not activated`.
+Cada compose recibe un checkbox **Track email**, inicialmente **OFF**, cerca de
+Send. Marcarlo solo cambia su estado temporal: todavía no hace tracking real, no
+crea IDs, no llama APIs de tracking, no inserta píxeles, no modifica el contenido
+del correo ni intercepta Send. Tampoco extrae asunto ni destinatarios. Outlook
+mantiene el mensaje inicial del content script, sin adapter.
 
 `GmailAdapter` recibe el documento y un callback. Al iniciar hace un escaneo inicial
 y mantiene un único `MutationObserver` sobre el documento para altas de nodos y
-cambios de los atributos `role`, `name` y `contenteditable`. Revisa los subárboles
+cambios de los atributos `role`, `name`, `contenteditable`, `aria-label` y
+`data-tooltip`. Revisa los subárboles
 añadidos y sus diálogos contenedores, sin recorrer todo el documento en cada
 mutación, sin polling y sin observar cada pulsación de texto. Esto permite detectar
 compose existentes, simultáneos y abiertos más tarde, también cuando Gmail monta
 los controles por etapas. `stop()` desconecta el observer y descarta sus pendientes;
-`start()` es idempotente y permite reiniciarlo.
+`start()` es idempotente y permite reiniciarlo. También reintenta colocar el control
+cuando aparecen las acciones, sin crear un observer adicional.
+
+`GmailTrackingControls` guarda los controles en un `WeakMap` por elemento de
+compose. El checkbox es la fuente de su estado; cambiar uno no afecta los demás.
+No se persiste en `chrome.storage` ni sobrevive a una recarga de Gmail. Si Gmail
+reconstruye el área de acciones, se vuelve a insertar el mismo control conservando
+ON/OFF. No se mantienen listas fuertes de compose ni listeners globales: al retirar
+un compose, su control, listener y estado pueden liberarse con él. Reinsertar el
+mismo elemento conserva su estado; abrir otro elemento nuevo empieza OFF.
+
+El componente usa un input checkbox nativo dentro de su label: Tab permite llegar
+al control y Espacio lo activa/desactiva. Los estilos y el input están dentro de un
+Shadow DOM y todas las clases usan el prefijo `email-tracker-toggle`. El CSS se
+empaqueta como texto en `content.js`, sin necesitar cambios de manifiesto ni Vite.
+El control utiliza colores de sistema con fondo propio para mantener contraste
+en temas claros y oscuros.
 
 Un `WeakSet` recuerda cada elemento de diálogo durante la vida del adapter. Editar,
 mover, minimizar o reinsertar el mismo elemento no produce otra notificación.
@@ -95,6 +116,20 @@ Todas las estrategias están en `src/providers/gmail/gmailSelectors.ts`:
 - Contenedor: `[role="dialog"]`.
 - Asunto: `input[name="subjectbox"]` dentro del mismo diálogo.
 - Editor: `[role="textbox"][contenteditable="true"]` dentro del mismo diálogo.
+- Acciones: botones nativos o `[role="button"]` con `data-tooltip` o `aria-label`.
+
+Para encontrar Send se prefiere el atajo Ctrl/Control/Cmd/Command/⌘ + Enter/Return
+en esos atributos, eliminando marcas Unicode de dirección. No depende del texto
+visible ni exclusivamente de la palabra inglesa Send. El fallback admite etiquetas
+exactas `Send` o `Enviar`, con un atajo opcional entre paréntesis. Si no reconoce
+ninguna señal, no adivina y sigue esperando mutaciones.
+
+Se añade el control al final de la celda `td` de Send, fuera de su grupo de botones.
+En layouts sin tabla se inserta después de `[role="group"]` o del propio botón,
+dentro de su contenedor. No mueve ni reemplaza elementos nativos. Rechaza posiciones
+dentro del editor, botones, contenedores que contienen el editor, raíces de diálogo
+y estructuras de tabla donde no sería válido insertar el control. Los selectores
+y la estrategia de ubicación están aislados en `gmailSelectors.ts`.
 
 Se exige la combinación de las tres señales. No se depende de clases ofuscadas
 ni de etiquetas traducidas. `subjectbox` es un nombre interno que Gmail puede
@@ -102,8 +137,15 @@ cambiar; Gmail no ofrece un contrato público de su DOM. Variantes sin estas
 señales, respuestas inline y redacción en otra ventana del navegador con estructura
 distinta no están cubiertas. No se comprueba visibilidad: un compose montado pero
 oculto puede notificarse. Si Gmail reutiliza exactamente el mismo elemento de
-diálogo para otro compose, no habrá una segunda notificación. Si faltan señales,
-el adapter sigue observando sin notificar.
+diálogo para otro compose, no habrá una segunda notificación y puede conservar el
+estado anterior. Si faltan señales, el adapter sigue observando sin insertar.
+
+Los atributos del atajo, `td` y la estructura del grupo tampoco son un contrato
+público. Otros idiomas sin un atajo reconocible, formatos distintos de atajo o
+cambios de Gmail pueden impedir la inserción. El control ocupa espacio adicional:
+en compose estrechos puede desplazarse a otra línea. El color sigue el esquema del
+navegador/sistema, que puede diferir del tema de Gmail, manteniendo un fondo propio.
+La colocación, los temas y el teclado requieren validación visual en Gmail real.
 
 Los tests Vitest + jsdom usan fixtures pequeños para verificar el comportamiento;
 no sustituyen la comprobación manual contra Gmail real. No se incluyen E2E.
@@ -115,17 +157,20 @@ no sustituyen la comprobación manual contra Gmail real. No se incluyen E2E.
    activa **Developer mode**, pulsa **Load unpacked** y selecciona `apps/extension/dist`.
 3. Abre o recarga Gmail Web (`https://mail.google.com/`); recargar la extensión no
    actualiza el content script de una pestaña que ya estaba abierta.
-4. Abre DevTools → **Console**, habilita mensajes de nivel **Info** y filtra por
-   `Email Tracker`. Comprueba el mensaje inicial `Email Tracker extension active`.
-5. Crea un correo nuevo y verifica `Email Tracker: Gmail compose detected`.
-6. Abre una segunda ventana de redacción manteniendo la primera. Debe haber una
-   detección por cada ventana; Chrome puede agrupar los mensajes iguales con un contador.
-7. Escribe en asunto y cuerpo, cambia el foco y realiza otras acciones. El número
-   de detecciones de esas ventanas debe permanecer estable.
-8. Cierra una ventana, abre otra nueva y comprueba una nueva detección.
-9. Espera varios minutos y abre otro compose: también debe detectarse.
-10. Para verificar el escaneo inicial, deja un compose abierto y recarga Gmail;
-    cuando Gmail restaure el compose debe aparecer su detección.
+4. Abre un compose nuevo. Debe aparecer un único **Track email** cerca de Send,
+   desmarcado (OFF).
+5. Actívalo y desactívalo pulsando el checkbox o su texto. Comprueba también Tab y
+   Espacio; el foco debe ser visible y el checkbox debe cambiar sin enviar nada.
+6. Deja el primero ON y abre otro compose: el segundo debe empezar OFF. Cambiar el
+   segundo no debe cambiar el primero.
+7. Escribe asunto y cuerpo, adjunta un archivo de prueba y abre/cierra paneles del
+   compose. Debe seguir existiendo solo un control por compose, con el mismo estado.
+8. Cierra un compose y abre uno nuevo: debe aparecer un único control OFF.
+9. Repite con tema claro y oscuro, y con compose estrecho o ampliado. Comprueba que
+   Send y sus opciones siguen visibles y utilizables, sin pulsar Send.
+10. Deja un compose abierto y recarga Gmail: al restaurarlo debe tener un único
+    control OFF. Opcionalmente comprueba el log de detección en DevTools → Console;
+    no se registran cambios del toggle ni contenido del correo.
 
 No hace falta activar la licencia ni enviar correos. Edge permite el mismo flujo
 desde `edge://extensions`. La validación real en ambos navegadores es manual.

@@ -1,0 +1,31 @@
+.email-tracker-toggle__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline: 8px;
+  padding: 5px 8px;
+  border: 1px solid #80868b;
+  border-radius: 4px;
+  background: Canvas;
+  color: CanvasText;
+  color-scheme: light dark;
+  font:
+    13px/1.4 Arial,
+    sans-serif;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.email-tracker-toggle__input {
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: #1a73e8;
+  cursor: pointer;
+}
+
+.email-tracker-toggle__input:focus-visible {
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}

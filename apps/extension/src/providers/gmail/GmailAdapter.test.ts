@@ -7,8 +7,15 @@ function compose(): HTMLElement {
   const node = document.createElement('section');
   node.setAttribute('role', 'dialog');
   node.innerHTML =
-    '<input name="subjectbox"><div role="textbox" contenteditable="true"></div>';
+    '<input name="subjectbox"><div role="textbox" contenteditable="true"></div>' +
+    '<table><tbody><tr><td><div role="group"><div role="button" tabindex="0" data-tooltip="Enviar (Ctrl-Enter)">Enviar</div><div role="button" aria-label="Más opciones de envío"></div></div></td></tr></tbody></table>';
   return node;
+}
+
+function toggleInput(node: HTMLElement): HTMLInputElement {
+  return node
+    .querySelector('.email-tracker-toggle')!
+    .shadowRoot!.querySelector<HTMLInputElement>('input')!;
 }
 
 async function mutations(): Promise<void> {
@@ -42,13 +49,20 @@ describe('GmailAdapter', () => {
     expect(adapter.canHandle(new URL(url))).toBe(false);
   });
 
-  it('detects an existing compose without modifying its DOM', () => {
+  it('detects an existing compose without modifying native controls or the email', () => {
     const node = compose();
     document.body.append(node);
-    const original = document.body.innerHTML;
+    const editor = node.querySelector('[contenteditable]')!;
+    const subject = node.querySelector('input')!;
+    const sendGroup = node.querySelector('[role="group"]')!;
+    const originals = [editor, subject, sendGroup].map(
+      (element) => element.outerHTML,
+    );
     adapter.start();
     expect(detected).toHaveBeenCalledExactlyOnceWith(node);
-    expect(document.body.innerHTML).toBe(original);
+    expect(
+      [editor, subject, sendGroup].map((element) => element.outerHTML),
+    ).toEqual(originals);
   });
 
   it('detects a compose added inside a wrapper after starting', async () => {
@@ -183,5 +197,199 @@ describe('GmailAdapter', () => {
     document.body.append(compose());
     await mutations();
     expect(detected).toHaveBeenCalledTimes(2);
+  });
+
+  it('adds an OFF control beside Send in an existing compose', () => {
+    const node = compose();
+    document.body.append(node);
+    adapter.start();
+    expect(toggleInput(node).checked).toBe(false);
+    expect(node.querySelector('.email-tracker-toggle')!.parentElement).toBe(
+      node.querySelector('td'),
+    );
+    expect(
+      node
+        .querySelector('[role="group"]')!
+        .querySelector('.email-tracker-toggle'),
+    ).toBeNull();
+  });
+
+  it('adds a control to dynamically inserted compose', async () => {
+    adapter.start();
+    const node = compose();
+    document.body.append(node);
+    await mutations();
+    expect(toggleInput(node).checked).toBe(false);
+  });
+
+  it('keeps compose states independent with one control each', async () => {
+    const first = compose();
+    document.body.append(first);
+    adapter.start();
+    toggleInput(first).click();
+    const second = compose();
+    document.body.append(second);
+    await mutations();
+    expect(toggleInput(first).checked).toBe(true);
+    expect(toggleInput(second).checked).toBe(false);
+    expect(document.querySelectorAll('.email-tracker-toggle')).toHaveLength(2);
+  });
+
+  it('never duplicates controls during edits, attachments, repeated start or another adapter', async () => {
+    const node = compose();
+    document.body.append(node);
+    adapter.start();
+    adapter.start();
+    toggleInput(node).click();
+    const secondAdapter = new GmailAdapter(document, vi.fn());
+    try {
+      secondAdapter.start();
+      node.querySelector('[contenteditable]')!.textContent = 'Draft';
+      node.querySelector('input')!.value = 'Subject';
+      node.append(document.createElement('aside'));
+      node.querySelector('td')!.append(document.createElement('span'));
+      await mutations();
+      expect(node.querySelectorAll('.email-tracker-toggle')).toHaveLength(1);
+      expect(toggleInput(node).checked).toBe(true);
+      expect(detected).toHaveBeenCalledTimes(1);
+    } finally {
+      secondAdapter.stop();
+    }
+  });
+
+  it('waits for actions added after compose detection', async () => {
+    const node = compose();
+    const actions = node.querySelector('table')!;
+    actions.remove();
+    document.body.append(node);
+    adapter.start();
+    expect(node.querySelector('.email-tracker-toggle')).toBeNull();
+    node.append(actions);
+    await mutations();
+    expect(toggleInput(node).checked).toBe(false);
+    expect(detected).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for Send attributes populated later', async () => {
+    const node = compose();
+    const send = node.querySelector('[data-tooltip]')!;
+    send.removeAttribute('data-tooltip');
+    document.body.append(node);
+    adapter.start();
+    expect(node.querySelector('.email-tracker-toggle')).toBeNull();
+    send.setAttribute('aria-label', 'Enviar');
+    await mutations();
+    expect(toggleInput(node).checked).toBe(false);
+  });
+
+  it('reattaches the same ON control after Gmail rebuilds its actions', async () => {
+    const node = compose();
+    document.body.append(node);
+    adapter.start();
+    const original = toggleInput(node);
+    original.click();
+    node.querySelector('table')!.replaceWith(compose().querySelector('table')!);
+    await mutations();
+    expect(toggleInput(node)).toBe(original);
+    expect(original.checked).toBe(true);
+    expect(node.querySelectorAll('.email-tracker-toggle')).toHaveLength(1);
+  });
+
+  it('restores a removed control once without losing its state', async () => {
+    const node = compose();
+    document.body.append(node);
+    adapter.start();
+    toggleInput(node).click();
+    node.querySelector('.email-tracker-toggle')!.remove();
+    await mutations();
+    expect(node.querySelectorAll('.email-tracker-toggle')).toHaveLength(1);
+    expect(toggleInput(node).checked).toBe(true);
+    expect(detected).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles removal and starts a new compose OFF', async () => {
+    const first = compose();
+    document.body.append(first);
+    adapter.start();
+    toggleInput(first).click();
+    first.remove();
+    await mutations();
+    const second = compose();
+    document.body.append(second);
+    await mutations();
+    expect(toggleInput(second).checked).toBe(false);
+    expect(document.querySelectorAll('.email-tracker-toggle')).toHaveLength(1);
+  });
+
+  it('does not guess insertion from visible text alone', () => {
+    const node = compose();
+    node.querySelector('[data-tooltip]')!.removeAttribute('data-tooltip');
+    document.body.append(node);
+    adapter.start();
+    expect(node.querySelector('.email-tracker-toggle')).toBeNull();
+  });
+
+  it.each(['Send', 'Enviar', 'Senden (Ctrl-Enter)', '送信（⌘Enter）'])(
+    'supports action metadata %s',
+    (label) => {
+      const node = compose();
+      const send = node.querySelector('[data-tooltip]')!;
+      send.removeAttribute('data-tooltip');
+      send.setAttribute('aria-label', label);
+      document.body.append(node);
+      adapter.start();
+      expect(toggleInput(node).checked).toBe(false);
+    },
+  );
+
+  it('inserts after a Send group outside table layouts', () => {
+    const node = compose();
+    node.querySelector('table')!.remove();
+    const actions = document.createElement('footer');
+    actions.innerHTML =
+      '<div role="group"><button aria-label="Send">Send</button><button>Options</button></div>';
+    node.append(actions);
+    document.body.append(node);
+    adapter.start();
+    expect(actions.firstElementChild!.nextElementSibling).toBe(
+      node.querySelector('.email-tracker-toggle'),
+    );
+  });
+
+  it('never inserts in an editor or borrows a nested dialog action', () => {
+    const node = compose();
+    node.querySelector('table')!.remove();
+    node.querySelector('[contenteditable]')!.innerHTML =
+      '<div><button aria-label="Send">Quoted content</button></div>';
+    node.insertAdjacentHTML(
+      'beforeend',
+      '<div role="dialog"><footer><button aria-label="Send">Send</button></footer></div>',
+    );
+    const original = node.innerHTML;
+    document.body.append(node);
+    adapter.start();
+    expect(node.innerHTML).toBe(original);
+  });
+
+  it('preserves native Send click behavior when the checkbox changes', () => {
+    const node = compose();
+    const send = node.querySelector<HTMLElement>('[data-tooltip]')!;
+    const clicked = vi.fn();
+    send.addEventListener('click', clicked);
+    document.body.append(node);
+    adapter.start();
+    toggleInput(node).click();
+    expect(clicked).not.toHaveBeenCalled();
+    send.click();
+    expect(clicked).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not attach new controls after stop', async () => {
+    adapter.start();
+    adapter.stop();
+    const node = compose();
+    document.body.append(node);
+    await mutations();
+    expect(node.querySelector('.email-tracker-toggle')).toBeNull();
   });
 });

@@ -11,6 +11,8 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    // Comprobar el CSS real encapsulado, sin sustituir su import por texto vacío.
+    css: { include: [/TrackingToggle\.css/] },
     include: [
       '{apps,services,infrastructure,packages}/**/src/**/*.{test,spec}.ts',
     ],
