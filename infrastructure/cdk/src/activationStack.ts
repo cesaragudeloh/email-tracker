@@ -154,6 +154,56 @@ export class ActivationStack extends Stack {
       methods: [HttpMethod.POST],
       integration: new HttpLambdaIntegration('CreateTracking', createTracking),
     });
+    const queryLogs = new LogGroup(this, 'GetTrackingLogs', {
+      retention: RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    const queryRole = new Role(this, 'GetTrackingRole', {
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
+    });
+    queryLogs.grantWrite(queryRole);
+    queryRole.addToPolicy(
+      new PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [trackingTable.tableArn],
+      }),
+    );
+    queryRole.addToPolicy(
+      new PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [secret.secretArn],
+      }),
+    );
+    const getTracking = new Function(this, 'GetTrackingFunction', {
+      runtime: Runtime.NODEJS_22_X,
+      code:
+        props.lambdaCode ??
+        Code.fromAsset(
+          fileURLToPath(
+            new URL(
+              '../../../services/tracking-api/build/lambda/',
+              import.meta.url,
+            ),
+          ),
+        ),
+      handler: 'getTracking.handler',
+      timeout: Duration.seconds(10),
+      memorySize: 256,
+      role: queryRole,
+      logGroup: queryLogs,
+      environment: {
+        TRACKING_TABLE_NAME: trackingTable.tableName,
+        JWT_SECRET_ARN: secret.secretArn,
+        ...(props.trackingBaseUrl
+          ? { TRACKING_BASE_URL: props.trackingBaseUrl }
+          : {}),
+      },
+    });
+    api.addRoutes({
+      path: '/api/tracking/{trackingId}',
+      methods: [HttpMethod.GET],
+      integration: new HttpLambdaIntegration('GetTracking', getTracking),
+    });
     const pixelLogs = new LogGroup(this, 'OpenTrackingLogs', {
       retention: RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.RETAIN,

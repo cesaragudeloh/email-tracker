@@ -13,8 +13,8 @@ beforeAll(() => {
   );
 }, 60000);
 it('creates activation and tracking routes with separate Lambdas', () => {
-  result.resourceCountIs('AWS::Lambda::Function', 3);
-  result.resourceCountIs('AWS::ApiGatewayV2::Route', 3);
+  result.resourceCountIs('AWS::Lambda::Function', 4);
+  result.resourceCountIs('AWS::ApiGatewayV2::Route', 4);
   result.hasResourceProperties('AWS::ApiGatewayV2::Route', {
     RouteKey: 'POST /api/activate',
   });
@@ -121,5 +121,58 @@ it('grants pixel only GetItem/PutItem on EmailTracking and log writes', () => {
     Action: ['dynamodb:GetItem', 'dynamodb:PutItem'],
     Effect: 'Allow',
     Resource: { 'Fn::GetAtt': [tableId, 'Arn'] },
+  });
+});
+
+it('routes GET tracking to the dedicated JWT-verifying Lambda', () => {
+  const functions = result.findResources('AWS::Lambda::Function');
+  const functionId = Object.keys(functions).find((id) =>
+    id.startsWith('GetTrackingFunction'),
+  )!;
+  expect(functions[functionId].Properties.Handler).toBe('getTracking.handler');
+  expect(
+    functions[functionId].Properties.Environment.Variables.JWT_SECRET_ARN,
+  ).toBeDefined();
+  expect(
+    functions[functionId].Properties.Environment.Variables.LICENSE_TABLE_NAME,
+  ).toBeUndefined();
+  const integrations = result.findResources('AWS::ApiGatewayV2::Integration');
+  const integrationId = Object.keys(integrations).find((id) =>
+    JSON.stringify(integrations[id]).includes(functionId),
+  )!;
+  result.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+    RouteKey: 'GET /api/tracking/{trackingId}',
+    Target: { 'Fn::Join': ['', ['integrations/', { Ref: integrationId }]] },
+  });
+});
+it('grants query Lambda only GetItem/Query on EmailTracking and reads of the signing secret', () => {
+  const tables = result.findResources('AWS::DynamoDB::Table');
+  const tableId = Object.keys(tables).find((id) =>
+    id.startsWith('EmailTracking'),
+  )!;
+  const policies = result.findResources('AWS::IAM::Policy');
+  const policyId = Object.keys(policies).find((id) =>
+    id.startsWith('GetTrackingRole'),
+  )!;
+  const statements = policies[policyId].Properties.PolicyDocument.Statement;
+  expect(statements).toHaveLength(3);
+  expect(statements[1]).toEqual({
+    Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': [tableId, 'Arn'] },
+  });
+  expect(statements[2].Action).toBe('secretsmanager:GetSecretValue');
+  const secrets = result.findResources('AWS::SecretsManager::Secret');
+  expect(statements[2].Resource).toEqual({ Ref: Object.keys(secrets)[0] });
+  for (const action of ['Scan', 'PutItem', 'UpdateItem', 'DeleteItem'])
+    expect(JSON.stringify(statements)).not.toContain(`dynamodb:${action}`);
+  const roles = result.findResources('AWS::IAM::Role');
+  const roleId = Object.keys(roles).find((id) =>
+    id.startsWith('GetTrackingRole'),
+  )!;
+  expect(roles[roleId].Properties.ManagedPolicyArns).toBeUndefined();
+  result.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'getTracking.handler',
+    Role: { 'Fn::GetAtt': [roleId, 'Arn'] },
   });
 });

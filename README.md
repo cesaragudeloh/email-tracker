@@ -1,7 +1,7 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 7 añade un pixel público y eventos OPEN
-a la creación de tracking y activación por licencia. El popup obtiene una autorización firmada
+Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 8 añade consulta protegida, contador derivado e historial de eventos OPEN
+a la creación de tracking, pixel público y activación por licencia. El popup obtiene una autorización firmada
 por el backend antes de mostrar `Activated`. Una carga del pixel registra una apertura detectada; Gmail todavía no modifica el correo.
 
 ## Arquitectura implementada
@@ -17,16 +17,19 @@ Cliente de extensión → POST /api/tracking → CreateTracking Lambda
                                            (verifica JWT)
                                                  ↓
                                       DynamoDB EmailTracking
+                                                 ↑
+Cliente de extensión → GET /api/tracking/{trackingId} → GetTracking Lambda
+                                                  (JWT + ownership por licencia)
 ```
 
 - `apps/extension`: Manifest V3, TypeScript strict, Vite, HTML y CSS, sin React.
 - `services/tracking-api`: handler, servicio, repositorio DynamoDB, firma JWT y CLI.
 - `packages/shared`: contratos Zod, normalización y tipos compartidos.
-- `infrastructure/cdk`: dos tablas, un secreto, tres Lambdas Node.js 22 y tres rutas HTTP.
+- `infrastructure/cdk`: dos tablas, un secreto, cuatro Lambdas Node.js 22 y cuatro rutas HTTP.
 - Herramientas: Node.js 24 y npm 11 para desarrollo, ESLint, Prettier y Vitest.
 
 La infraestructura está preparada, **no desplegada**. No se configura dominio,
-certificado, authorizer externo ni Cognito. La creación de tracking verifica JWT en Lambda; el pixel es público.
+certificado, authorizer externo ni Cognito. La creación y consulta de tracking verifican JWT en Lambda; el pixel es público.
 
 ## Instalación y validación local
 
@@ -235,9 +238,9 @@ El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
 acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
 sustituyen esa validación de deployment.
 
-## Fuera del Milestone 7
+## Fuera del Milestone 8
 
-No se implementan consulta de tracking, historial, Outlook, geolocalización,
+No se implementan UI de historial, Outlook, geolocalización,
 parsing de User-Agent, dashboard ni link tracking. Gmail conserva su adapter
 y checkbox del Milestone 5: no se conecta a la API, no modifica el body ni intercepta Send.
 
@@ -469,3 +472,126 @@ curl -D - "$API_BASE_URL/o/$TRACKING_ID" --output /tmp/tracking-pixel.png
    La IP observada puede ser la del proxy/red de salida del cliente usado para curl.
 
 No se despliega AWS ni se configura el dominio de producción durante la validación local.
+
+## Milestone 8: consulta protegida e historial
+
+`GET /api/tracking/{trackingId}` requiere `Authorization: Bearer <JWT>`.
+La Lambda dedicada `getTracking.handler` reutiliza `createAuthorization` y
+`verifyToken`: verifica firma, expiración, issuer, audience, licenseId e
+installationId. La autorización se ejecuta en Lambda, no en un authorizer de API
+Gateway. La ruta nunca entrega metadata sin JWT válido. Los JWT emitidos siguen
+siendo válidos hasta expirar aunque se revoque posteriormente la licencia.
+
+El handler valida el UUID exclusivamente desde pathParameters y lo normaliza a
+minúsculas. `GetTrackingService` hace GetItem de EMAIL, valida ownership por
+**licenseId** y después consulta eventos. Otra instalación autorizada de la misma
+licencia puede consultar. EMAIL inexistente y EMAIL de otra licencia producen
+exactamente **404 `NOT_FOUND`**: así no se revela si existe un recurso ajeno y no
+se leen sus OPEN. UUID inválido produce 400 `INVALID_TRACKING_ID` sin DynamoDB;
+JWT ausente, inválido o expirado produce 401 `UNAUTHORIZED`; fallos internos,
+500 `SERVICE_UNAVAILABLE` sin detalles. La validación del UUID precede al JWT.
+
+`TrackingRepository.listOpenEvents` usa Query sobre la tabla existente:
+
+```text
+PK = TRACKING#{trackingId} AND begins_with(SK, OPEN#)
+ScanIndexForward = true
+ConsistentRead = true
+```
+
+GetItem también es consistente. Se conserva el orden natural ascendente del SK
+`OPEN#{openedAt}#{eventId}`, sin ordenar en memoria. El repositorio sigue
+LastEvaluatedKey hasta completar todas las páginas: no hay límite deliberado ni
+paginación visible. Una consulta normal requiere GetItem + Query; historiales
+superiores a una página requieren más Query. No usa Scan ni escribe EMAIL.
+La operación queda aislada para incorporar paginación posteriormente. Las lecturas
+no forman un snapshot transaccional: aperturas concurrentes pueden aparecer en
+esta consulta o en la siguiente. Historias muy grandes siguen sujetas a límites
+de tiempo/tamaño de Lambda y API Gateway; no se devuelve un historial parcial
+como exitoso si falla una página.
+
+Respuesta **200**, con `Cache-Control: no-store`:
+
+```json
+{
+  "trackingId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "OPEN_DETECTED",
+  "recipient": "client@example.com",
+  "subject": "Technical Interview Follow-up",
+  "createdAt": "2026-09-24T20:15:00.000Z",
+  "openCount": 1,
+  "firstOpenedAt": "2026-09-24T20:20:00.000Z",
+  "lastOpenedAt": "2026-09-24T20:20:00.000Z",
+  "events": [
+    {
+      "eventId": "8a73e54e-c33f-40ca-a2dc-06626851744d",
+      "openedAt": "2026-09-24T20:20:00.000Z",
+      "ip": "192.0.2.1",
+      "userAgent": "Raw mail client User-Agent"
+    }
+  ]
+}
+```
+
+Sin OPEN: `status=CREATED`, `openCount=0`, `firstOpenedAt=null`,
+`lastOpenedAt=null`, `events=[]`. Con OPEN: `status=OPEN_DETECTED`,
+`openCount=events.length`, primera y última fecha tomadas del primer y último
+evento. IP y User-Agent pueden ser null y solo se entregan al dueño autorizado.
+No se devuelven claves DynamoDB ni identidades internas. Los eventos son la fuente
+de verdad; no se guarda contador redundante ni se introduce SENT. Apertura
+detectada no prueba lectura humana.
+
+Los contratos Zod y tipos compartidos incluyen `TrackingStatus`,
+`TrackingOpenEventResponse` y `GetTrackingResponse`.
+`createTrackingClient().getTracking(trackingId)` obtiene el token desde storage,
+usa la configuración API existente, envía Bearer y valida la respuesta. No hace
+fetch sin autorización local vigente. Mapea 401 a reactivación, 404 a tracking no
+encontrado y errores de red a indisponibilidad. **El popup todavía no consume
+este endpoint automáticamente**: no hay polling ni llamadas automáticas.
+
+CDK añade una Lambda, grupo de logs, rol e integración dedicados. El rol solo
+permite GetItem/Query sobre EmailTracking, GetSecretValue sobre el secreto JWT
+y escritura en sus logs; no permite Scan, escrituras DynamoDB ni acceso a licencias.
+Los logs contienen requestId, trackingId y resultado, nunca JWT, IP/User-Agent,
+destinatario, asunto o errores internos. No se añaden tablas ni dominios.
+
+No hay geolocalización, parsing de navegador/OS/dispositivo, detección de proxies
+o Apple MPP, Outlook, UI de historial, Gmail Send, inserción automática de pixel,
+link tracking ni dashboard.
+
+### Validación del Milestone 8 sin AWS
+
+```sh
+npm run build
+npm run lint
+npm test
+npm run format:check
+npm run synth --workspace=@email-tracker/cdk -- --no-lookups
+```
+
+Tests unitarios Vitest con DynamoDB, JWT, storage y fetch mockeados; la suite
+existente además valida JWT reales con claves de prueba. No hay tests E2E ni AWS
+real. Carga la extensión compilada en Chrome/Edge y verifica que el popup y el
+checkbox no inician consultas de historial.
+
+### Validación opcional del Milestone 8 con AWS
+
+Solo después de autorización explícita, desplegar el stack con el flujo anterior,
+crear licencia, obtener JWT con POST /api/activate y crear un tracking con
+POST /api/tracking. Usar el output ApiUrl como API_BASE_URL, el token como TOKEN y
+el UUID devuelto como TRACKING_ID. Consultar antes de cargar el pixel debe devolver
+CREATED, cero eventos y fechas null.
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+  "$API_BASE_URL/api/tracking/$TRACKING_ID"
+# Ejecutar varias veces para generar eventos independientes:
+curl "$API_BASE_URL/o/$TRACKING_ID" --output /tmp/tracking-pixel.png
+curl -H "Authorization: Bearer $TOKEN" \
+  "$API_BASE_URL/api/tracking/$TRACKING_ID"
+```
+
+Verificar OPEN_DETECTED, openCount igual al número de eventos, historial ascendente,
+firstOpenedAt/lastOpenedAt y metadata. Probar JWT de otra licencia: 404 idéntico al
+UUID inexistente. Otro dispositivo de la misma licencia debe recibir 200. Sin
+Bearer: 401; UUID inválido: 400. No se despliega automáticamente.

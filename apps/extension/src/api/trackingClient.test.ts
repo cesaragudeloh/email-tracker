@@ -102,3 +102,98 @@ it('sanitizes storage errors', async () => {
   });
   expect(fetcher).not.toHaveBeenCalled();
 });
+
+const history = {
+  trackingId: response.trackingId,
+  recipient: request.recipient,
+  subject: '',
+  createdAt: response.createdAt,
+  status: 'OPEN_DETECTED',
+  openCount: 1,
+  firstOpenedAt: response.createdAt,
+  lastOpenedAt: response.createdAt,
+  events: [
+    {
+      eventId: crypto.randomUUID(),
+      openedAt: response.createdAt,
+      ip: '192.0.2.1',
+      userAgent: 'Raw agent',
+    },
+  ],
+};
+it('getTracking reads storage and sends Bearer with the UUID URL and parses history', async () => {
+  const { client, storage, fetcher } = setup();
+  expect(fetcher).not.toHaveBeenCalled();
+  fetcher.mockResolvedValue(Response.json(history));
+  expect(await client.getTracking(response.trackingId)).toEqual(history);
+  expect(storage.readAuthorization).toHaveBeenCalledWith(installationId);
+  expect(fetcher).toHaveBeenCalledExactlyOnceWith(
+    `https://api.example.test/api/tracking/${response.trackingId}`,
+    expect.objectContaining({
+      method: 'GET',
+      headers: { Authorization: 'Bearer stored-token' },
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'error',
+    }),
+  );
+});
+it.each([
+  [401, 'UNAUTHORIZED'],
+  [404, 'NOT_FOUND'],
+  [400, 'INVALID_TRACKING_ID'],
+  [500, 'SERVICE_UNAVAILABLE'],
+])('getTracking maps HTTP %s', async (status, code) => {
+  const { client, fetcher } = setup();
+  fetcher.mockResolvedValue(
+    new Response('private details', { status: Number(status) }),
+  );
+  await expect(client.getTracking(response.trackingId)).rejects.toMatchObject({
+    code,
+  });
+});
+it('getTracking sanitizes network failures', async () => {
+  const { client, fetcher } = setup();
+  fetcher.mockRejectedValue(new Error('private details'));
+  await expect(client.getTracking(response.trackingId)).rejects.toMatchObject({
+    code: 'SERVICE_UNAVAILABLE',
+    message: 'Tracking service unavailable. Please try again later.',
+  });
+});
+it('getTracking does not fetch without a token', async () => {
+  const { client, fetcher, storage } = setup();
+  storage.readAuthorization.mockResolvedValue(undefined);
+  await expect(client.getTracking(response.trackingId)).rejects.toMatchObject({
+    code: 'UNAUTHORIZED',
+  });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+it('getTracking rejects malformed response', async () => {
+  const { client, fetcher } = setup();
+  fetcher.mockResolvedValue(Response.json({ ...history, events: [{}] }));
+  await expect(client.getTracking(response.trackingId)).rejects.toMatchObject({
+    code: 'SERVICE_UNAVAILABLE',
+  });
+});
+it('getTracking rejects invalid UUID before fetch', async () => {
+  const { client, fetcher } = setup();
+  await expect(client.getTracking('../secret')).rejects.toMatchObject({
+    code: 'INVALID_TRACKING_ID',
+  });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+it('getTracking does not fetch without API configuration', async () => {
+  const { storage, fetcher } = setup();
+  await expect(
+    createTrackingClient(storage, '', fetcher).getTracking(response.trackingId),
+  ).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+it('getTracking sanitizes storage failures', async () => {
+  const { client, storage, fetcher } = setup();
+  storage.readAuthorization.mockRejectedValue(new Error('private storage'));
+  await expect(client.getTracking(response.trackingId)).rejects.toMatchObject({
+    code: 'SERVICE_UNAVAILABLE',
+  });
+  expect(fetcher).not.toHaveBeenCalled();
+});

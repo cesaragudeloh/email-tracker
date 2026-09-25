@@ -54,3 +54,41 @@ it('validates response UUID, URL, timestamp and CREATED status', () => {
   expect(trackingStatusSchema.parse('CREATED')).toBe('CREATED');
   expect(trackingStatusSchema.safeParse('SENT').success).toBe(false);
 });
+
+it('validates query responses with CREATED and nullable metadata', async () => {
+  const { getTrackingResponseSchema } = await import('./tracking.js');
+  const empty = {
+    ...request,
+    trackingId: crypto.randomUUID(),
+    createdAt: '2026-09-24T10:00:00.000Z',
+    status: 'CREATED',
+    openCount: 0,
+    firstOpenedAt: null,
+    lastOpenedAt: null,
+    events: [],
+  };
+  expect(getTrackingResponseSchema.parse(empty)).toEqual(empty);
+  const open = {
+    ...empty,
+    status: 'OPEN_DETECTED',
+    openCount: 1,
+    firstOpenedAt: empty.createdAt,
+    lastOpenedAt: empty.createdAt,
+    events: [
+      {
+        eventId: crypto.randomUUID(),
+        openedAt: empty.createdAt,
+        ip: null,
+        userAgent: null,
+      },
+    ],
+  };
+  expect(getTrackingResponseSchema.parse(open)).toEqual(open);
+  for (const invalid of [
+    { ...empty, status: 'SENT' },
+    { ...empty, openCount: -1 },
+    { ...empty, licenseId: 'private' },
+    { ...open, events: [{ ...open.events[0], browser: 'future' }] },
+  ])
+    expect(getTrackingResponseSchema.safeParse(invalid).success).toBe(false);
+});

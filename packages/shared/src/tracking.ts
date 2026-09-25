@@ -7,7 +7,7 @@ export const createTrackingRequestSchema = z
   })
   .strict();
 
-export const trackingStatusSchema = z.literal('CREATED');
+export const trackingStatusSchema = z.enum(['CREATED', 'OPEN_DETECTED']);
 export const createTrackingResponseSchema = z
   .object({
     trackingId: z.uuid(),
@@ -21,3 +21,29 @@ export type CreateTrackingResponse = z.infer<
   typeof createTrackingResponseSchema
 >;
 export type TrackingStatus = z.infer<typeof trackingStatusSchema>;
+
+export const trackingOpenEventResponseSchema = z
+  .object({
+    eventId: z.uuid(),
+    openedAt: z.iso.datetime(),
+    ip: z.string().nullable(),
+    userAgent: z.string().nullable(),
+  })
+  .strict();
+
+export const getTrackingResponseSchema = createTrackingRequestSchema
+  .extend({
+    trackingId: z.uuid(),
+    status: trackingStatusSchema,
+    createdAt: z.iso.datetime(),
+    openCount: z.number().int().nonnegative(),
+    firstOpenedAt: z.iso.datetime().nullable(),
+    lastOpenedAt: z.iso.datetime().nullable(),
+    events: z.array(trackingOpenEventResponseSchema),
+  })
+  .strict();
+
+export type TrackingOpenEventResponse = z.infer<
+  typeof trackingOpenEventResponseSchema
+>;
+export type GetTrackingResponse = z.infer<typeof getTrackingResponseSchema>;

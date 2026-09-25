@@ -4,6 +4,7 @@ await build({
   entryPoints: [
     'src/index.ts',
     'src/createTracking.ts',
+    'src/getTracking.ts',
     'src/openTrackingPixel.ts',
   ],
   outdir: 'build/lambda',

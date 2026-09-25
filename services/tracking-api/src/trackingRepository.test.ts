@@ -114,3 +114,83 @@ it('propagates OPEN PutItem failures for the service to handle', async () => {
     }),
   ).rejects.toThrow('write failure');
 });
+
+it('queries OPEN prefix in ascending order and follows all DynamoDB pages', async () => {
+  const { QueryCommand } = await import('@aws-sdk/lib-dynamodb');
+  const first = {
+    eventId: crypto.randomUUID(),
+    openedAt: '2026-09-24T10:00:00.000Z',
+    ip: '192.0.2.1',
+    userAgent: 'Raw agent',
+  };
+  const last = {
+    ...first,
+    eventId: crypto.randomUUID(),
+    openedAt: '2026-09-24T11:00:00.000Z',
+    ip: null,
+    userAgent: null,
+  };
+  const cursor = {
+    PK: `TRACKING#${record.trackingId}`,
+    SK: `OPEN#${first.openedAt}#${first.eventId}`,
+  };
+  const send = vi
+    .fn()
+    .mockResolvedValueOnce({
+      Items: [{ ...first, ...cursor, eventType: 'OPEN' }],
+      LastEvaluatedKey: cursor,
+    })
+    .mockResolvedValueOnce({ Items: [last] });
+  expect(
+    await new DynamoTrackingRepository({ send }, 'table').listOpenEvents(
+      record.trackingId,
+    ),
+  ).toEqual([first, last]);
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(send.mock.calls[0][0]).toBeInstanceOf(QueryCommand);
+  const input = {
+    TableName: 'table',
+    KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+    ExpressionAttributeValues: {
+      ':pk': `TRACKING#${record.trackingId}`,
+      ':prefix': 'OPEN#',
+    },
+    ScanIndexForward: true,
+    ConsistentRead: true,
+  };
+  expect(send.mock.calls[0][0].input).toEqual(input);
+  expect(send.mock.calls[1][0].input).toEqual({
+    ...input,
+    ExclusiveStartKey: cursor,
+  });
+});
+it('returns an empty OPEN history', async () => {
+  const send = vi.fn().mockResolvedValue({});
+  expect(
+    await new DynamoTrackingRepository({ send }, 'table').listOpenEvents(
+      record.trackingId,
+    ),
+  ).toEqual([]);
+});
+it('does not return partial history if a later Query page fails', async () => {
+  const send = vi
+    .fn()
+    .mockResolvedValueOnce({
+      Items: [],
+      LastEvaluatedKey: { PK: 'key', SK: 'key' },
+    })
+    .mockRejectedValueOnce(new Error('query failure'));
+  await expect(
+    new DynamoTrackingRepository({ send }, 'table').listOpenEvents(
+      record.trackingId,
+    ),
+  ).rejects.toThrow('query failure');
+});
+it('rejects malformed persisted OPEN events', async () => {
+  const send = vi.fn().mockResolvedValue({ Items: [{ eventId: 'invalid' }] });
+  await expect(
+    new DynamoTrackingRepository({ send }, 'table').listOpenEvents(
+      record.trackingId,
+    ),
+  ).rejects.toThrow();
+});

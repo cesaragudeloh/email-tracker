@@ -1,5 +1,7 @@
 import {
   GetCommand,
+  QueryCommand,
+  type QueryCommandInput,
   PutCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
@@ -9,6 +11,8 @@ import { z } from 'zod';
 import {
   createTrackingRequestSchema,
   trackingStatusSchema,
+  trackingOpenEventResponseSchema,
+  type TrackingOpenEventResponse,
 } from '@email-tracker/shared';
 
 const trackingRecordSchema = createTrackingRequestSchema
@@ -22,6 +26,7 @@ const trackingRecordSchema = createTrackingRequestSchema
   .strip();
 
 export interface TrackingRepository {
+  listOpenEvents(trackingId: string): Promise<TrackingOpenEventResponse[]>;
   create(record: TrackingRecord): Promise<void>;
   getTracking(trackingId: string): Promise<TrackingRecord | undefined>;
   createOpenEvent(event: TrackingOpenEvent): Promise<void>;
@@ -32,6 +37,33 @@ export class DynamoTrackingRepository implements TrackingRepository {
     private readonly client: Pick<DynamoDBDocumentClient, 'send'>,
     private readonly tableName: string,
   ) {}
+
+  async listOpenEvents(
+    trackingId: string,
+  ): Promise<TrackingOpenEventResponse[]> {
+    const events: TrackingOpenEventResponse[] = [];
+    let cursor: QueryCommandInput['ExclusiveStartKey'];
+    do {
+      const page = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+          ExpressionAttributeValues: {
+            ':pk': `TRACKING#${trackingId}`,
+            ':prefix': 'OPEN#',
+          },
+          ScanIndexForward: true,
+          ConsistentRead: true,
+          ...(cursor ? { ExclusiveStartKey: cursor } : {}),
+        }),
+      );
+      for (const item of page.Items ?? []) {
+        events.push(trackingOpenEventResponseSchema.strip().parse(item));
+      }
+      cursor = page.LastEvaluatedKey;
+    } while (cursor);
+    return events;
+  }
 
   async getTracking(trackingId: string): Promise<TrackingRecord | undefined> {
     const result = await this.client.send(

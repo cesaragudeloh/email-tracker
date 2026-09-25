@@ -17,8 +17,9 @@ export interface TrackingRecord
 
 export class TrackingError extends Error {
   constructor(
-    public readonly code: 'INVALID_REQUEST' | 'UNAUTHORIZED',
-    public readonly statusCode: 400 | 401,
+    public readonly code:
+      'INVALID_REQUEST' | 'UNAUTHORIZED' | 'INVALID_TRACKING_ID' | 'NOT_FOUND',
+    public readonly statusCode: 400 | 401 | 404,
   ) {
     super(code);
   }
