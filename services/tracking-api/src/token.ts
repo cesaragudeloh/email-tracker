@@ -18,7 +18,7 @@ export async function signToken(
     .sign(key);
 }
 
-// Utilidad para los futuros endpoints protegidos; no crea authorizers ni rutas.
+// Verificación compartida por los endpoints protegidos.
 export async function verifyToken(
   token: string,
   key: Uint8Array,

@@ -3,7 +3,8 @@
 Una base Manifest V3 para Chrome y Edge, con TypeScript, Vite, HTML y CSS.
 El popup muestra el estado local de autorización, solicita el código si no existe
 un JWT vigente y guarda la respuesta de `POST /api/activate` en `chrome.storage.local`.
-No almacena el código, no muestra el JWT y no implementa tracking.
+No almacena el código ni muestra el JWT. Incluye un cliente de creación de tracking
+sin conexión todavía con Gmail.
 
 ## Estructura
 
@@ -59,7 +60,7 @@ El proyecto no incluye servidor local de activación en este milestone.
 8. Después de cada build, recarga la extensión y las pestañas de correo.
 
 El estado del popup es informativo; el backend debe validar los JWT para autorizar
-futuras funcionalidades. Los tokens se restringen a contextos confiables de la
+`POST /api/tracking`. Los tokens se restringen a contextos confiables de la
 extensión. No existe activación offline ni bypass de desarrollo.
 
 Consulta [la documentación raíz](../../README.md) para crear licencias, variables,
@@ -174,3 +175,21 @@ no sustituyen la comprobación manual contra Gmail real. No se incluyen E2E.
 
 No hace falta activar la licencia ni enviar correos. Edge permite el mismo flujo
 desde `edge://extensions`. La validación real en ambos navegadores es manual.
+
+## Milestone 6: cliente de tracking
+
+`src/api/trackingClient.ts` expone `createTrackingClient().createTracking({ recipient,
+subject })` para popup o service worker. Reutiliza `config.apiBaseUrl` (configurada
+con `VITE_ACTIVATION_API_URL`) y el storage de activación; obtiene el JWT y envía
+`Authorization: Bearer` a `POST /api/tracking`. Sin autorización local vigente no
+hace fetch. Los contratos request/response se validan con el paquete shared.
+
+Devuelve `{ trackingId, trackingUrl, createdAt }`; `trackingUrl` es futura, sin un
+endpoint de pixel implementado. Un 401 solicita reactivación; errores de validación,
+red o backend se convierten en mensajes seguros. El backend verifica la firma y
+expiración: el estado local nunca concede permisos por sí mismo.
+
+Este cliente no se invoca automáticamente y no está conectado al checkbox ni a
+Send. Gmail no extrae destinatario/asunto ni modifica el correo. Los tests unitarios
+usan storage y fetch mockeados. Consulta el README raíz para el ejemplo curl,
+síntesis local, diseño CREATED y limitación de revocación de JWT de hasta 24 horas.

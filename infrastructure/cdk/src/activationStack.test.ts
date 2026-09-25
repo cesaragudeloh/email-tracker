@@ -12,9 +12,9 @@ beforeAll(() => {
     }),
   );
 }, 60000);
-it('creates only the activation route and one Lambda', () => {
-  result.resourceCountIs('AWS::Lambda::Function', 1);
-  result.resourceCountIs('AWS::ApiGatewayV2::Route', 1);
+it('creates activation and tracking routes with separate Lambdas', () => {
+  result.resourceCountIs('AWS::Lambda::Function', 2);
+  result.resourceCountIs('AWS::ApiGatewayV2::Route', 2);
   result.hasResourceProperties('AWS::ApiGatewayV2::Route', {
     RouteKey: 'POST /api/activate',
   });
@@ -24,7 +24,7 @@ it('creates only the activation route and one Lambda', () => {
   });
 });
 it('retains the keyed on-demand table and generates the signing secret', () => {
-  result.resourceCountIs('AWS::DynamoDB::Table', 1);
+  result.resourceCountIs('AWS::DynamoDB::Table', 2);
   result.hasResourceProperties('AWS::DynamoDB::Table', {
     BillingMode: 'PAY_PER_REQUEST',
     KeySchema: [
@@ -54,4 +54,36 @@ it('validates the configurable JWT duration before creating a stack', () => {
   expect(
     () => new ActivationStack(new App(), 'Invalid', { jwtTtlSeconds: 0 }),
   ).toThrow('Invalid JWT TTL');
+});
+
+it('scopes tracking DynamoDB access to PutItem on its dedicated table', () => {
+  result.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+    RouteKey: 'POST /api/tracking',
+  });
+  const tables = result.findResources('AWS::DynamoDB::Table');
+  const tableId = Object.keys(tables).find((id) =>
+    id.startsWith('EmailTracking'),
+  )!;
+  const policies = result.findResources('AWS::IAM::Policy');
+  const policyId = Object.keys(policies).find((id) =>
+    id.startsWith('CreateTrackingRole'),
+  )!;
+  const statements = policies[policyId].Properties.PolicyDocument.Statement;
+  expect(
+    statements.filter((statement: { Action: string | string[] }) =>
+      JSON.stringify(statement.Action).includes('dynamodb:'),
+    ),
+  ).toEqual([
+    {
+      Action: 'dynamodb:PutItem',
+      Effect: 'Allow',
+      Resource: { 'Fn::GetAtt': [tableId, 'Arn'] },
+    },
+  ]);
+  result.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'createTracking.handler',
+    Environment: {
+      Variables: Match.objectLike({ TRACKING_TABLE_NAME: { Ref: tableId } }),
+    },
+  });
 });

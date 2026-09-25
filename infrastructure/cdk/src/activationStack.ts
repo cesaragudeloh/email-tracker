@@ -18,6 +18,7 @@ import type { Construct } from 'constructs';
 interface ActivationStackProps extends StackProps {
   jwtTtlSeconds?: number;
   lambdaCode?: Code;
+  trackingBaseUrl?: string;
 }
 
 export class ActivationStack extends Stack {
@@ -96,6 +97,65 @@ export class ActivationStack extends Stack {
       path: '/api/activate',
       methods: [HttpMethod.POST],
       integration: new HttpLambdaIntegration('Activate', activate),
+    });
+    const trackingTable = new Table(this, 'EmailTracking', {
+      partitionKey: { name: 'PK', type: AttributeType.STRING },
+      sortKey: { name: 'SK', type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    const trackingLogs = new LogGroup(this, 'CreateTrackingLogs', {
+      retention: RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    const trackingRole = new Role(this, 'CreateTrackingRole', {
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
+    });
+    trackingLogs.grantWrite(trackingRole);
+    trackingRole.addToPolicy(
+      new PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [trackingTable.tableArn],
+      }),
+    );
+    trackingRole.addToPolicy(
+      new PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [secret.secretArn],
+      }),
+    );
+    const createTracking = new Function(this, 'CreateTrackingFunction', {
+      runtime: Runtime.NODEJS_22_X,
+      code:
+        props.lambdaCode ??
+        Code.fromAsset(
+          fileURLToPath(
+            new URL(
+              '../../../services/tracking-api/build/lambda/',
+              import.meta.url,
+            ),
+          ),
+        ),
+      handler: 'createTracking.handler',
+      timeout: Duration.seconds(10),
+      memorySize: 256,
+      role: trackingRole,
+      logGroup: trackingLogs,
+      environment: {
+        TRACKING_TABLE_NAME: trackingTable.tableName,
+        JWT_SECRET_ARN: secret.secretArn,
+        ...(props.trackingBaseUrl
+          ? { TRACKING_BASE_URL: props.trackingBaseUrl }
+          : {}),
+      },
+    });
+    api.addRoutes({
+      path: '/api/tracking',
+      methods: [HttpMethod.POST],
+      integration: new HttpLambdaIntegration('CreateTracking', createTracking),
+    });
+    new CfnOutput(this, 'TrackingTableName', {
+      value: trackingTable.tableName,
     });
     const stage = api.defaultStage?.node.defaultChild;
     if (stage instanceof CfnStage)

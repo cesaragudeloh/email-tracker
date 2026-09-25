@@ -1,8 +1,8 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 3 implementa
-exclusivamente activación por licencia. El popup obtiene una autorización firmada
-por el backend antes de mostrar `Activated`. Todavía no hay seguimiento de correos.
+Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 6 añade creación de registros de tracking
+a la activación por licencia. El popup obtiene una autorización firmada
+por el backend antes de mostrar `Activated`. Todavía no se detectan aperturas ni se modifica el correo.
 
 ## Arquitectura implementada
 
@@ -12,16 +12,21 @@ Popup de la extensión → POST /api/activate → API Gateway HTTP API
                                       Activation Lambda
                                         ↙          ↘
                                   DynamoDB      Secrets Manager
+
+Cliente de extensión → POST /api/tracking → CreateTracking Lambda
+                                           (verifica JWT)
+                                                 ↓
+                                      DynamoDB EmailTracking
 ```
 
 - `apps/extension`: Manifest V3, TypeScript strict, Vite, HTML y CSS, sin React.
 - `services/tracking-api`: handler, servicio, repositorio DynamoDB, firma JWT y CLI.
 - `packages/shared`: contratos Zod, normalización y tipos compartidos.
-- `infrastructure/cdk`: tabla, secreto, Lambda Node.js 22 y una sola ruta HTTP.
+- `infrastructure/cdk`: dos tablas, un secreto, dos Lambdas Node.js 22 y dos rutas HTTP.
 - Herramientas: Node.js 24 y npm 11 para desarrollo, ESLint, Prettier y Vitest.
 
 La infraestructura está preparada, **no desplegada**. No se configura dominio,
-certificado, authorizer, Cognito ni ningún recurso de tracking.
+certificado, authorizer externo ni Cognito. La autorización de tracking se verifica en Lambda.
 
 ## Instalación y validación local
 
@@ -82,7 +87,7 @@ cuando se conoce y el resultado; nunca códigos, hashes, tokens o secretos.
 
 ## Diseño DynamoDB
 
-Una tabla con claves string `PK`/`SK`, capacidad bajo demanda y retención al retirar
+La tabla de licencias tiene claves string `PK`/`SK`, capacidad bajo demanda y retención al retirar
 el stack. No utiliza Scan ni GSI:
 
 | Registro          | PK                    | SK                    | Atributos principales                                                                                         |
@@ -122,9 +127,8 @@ scripts. El JWT es un bearer token local, no un vínculo criptográfico al dispo
 Borrar datos o reinstalar puede crear otro UUID y consumir otro cupo.
 
 La utilidad backend `verifyToken` comprueba firma, algoritmo, issuer, audience y
-expiración; está preparada para futuros endpoints, sin añadir rutas protegidas.
-La revocación no invalida automáticamente un JWT ya emitido: sin una consulta de
-estado en un futuro endpoint, será válido hasta `exp`. El popup puede continuar
+expiración y claims; se reutiliza en `POST /api/tracking`.
+La revocación no invalida automáticamente un JWT ya emitido: el endpoint de tracking no consulta el estado de la licencia y acepta el token hasta `exp` (hasta 24 horas). El popup puede continuar
 mostrando `Activated` hasta esa expiración. No existe renovación automática.
 
 ## Crear licencias
@@ -231,12 +235,122 @@ El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
 acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
 sustituyen esa validación de deployment.
 
-## Fuera del Milestone 3
+## Fuera del Milestone 6
 
-No hay GmailAdapter, OutlookAdapter, detección de compose, tracking toggle/pixel,
-endpoints de tracking, eventos OPEN, geolocalización, análisis de User-Agent,
-dashboard, login, Cognito, billing ni usuarios SaaS. El content script mantiene
-únicamente el mensaje diagnóstico del Milestone 2.
+No se implementan pixel, eventos OPEN, consulta de tracking, historial, Outlook,
+geolocalización, User-Agent, dashboard ni link tracking. Gmail conserva su adapter
+y checkbox del Milestone 5: no se conecta a la API, no modifica el body ni intercepta Send.
 
 Referencias: [transacciones e IAM de DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html),
 [almacenamiento de extensiones Chromium](https://developer.chrome.com/docs/extensions/reference/api/storage).
+
+## Milestone 6: crear tracking
+
+`POST /api/tracking` requiere `Authorization: Bearer <JWT>` emitido por activación
+y JSON con exactamente estos campos:
+
+```json
+{
+  "recipient": "client@example.com",
+  "subject": "Technical Interview Follow-up"
+}
+```
+
+Zod exige email válido (máximo 254 caracteres) y asunto string de hasta 998
+caracteres; permite asunto vacío. Rechaza campos adicionales, incluyendo IDs,
+identidades, body, adjuntos o credenciales. El handler limita el cuerpo a 16 KiB.
+
+Devuelve **201** tras persistir:
+
+```json
+{
+  "trackingId": "8a73e54e-c33f-40ca-a2dc-06626851744d",
+  "trackingUrl": "https://tracking.cesaragudelo.com/o/8a73e54e-c33f-40ca-a2dc-06626851744d",
+  "createdAt": "2026-09-24T10:00:00.000Z"
+}
+```
+
+`trackingUrl` prepara una URL futura: **GET /o/{trackingId} todavía no existe**.
+`TrackingService` genera el UUID con `crypto.randomUUID()` en backend. La tabla
+independiente `EmailTracking` usa `PK=TRACKING#{trackingId}`, `SK=EMAIL` y conserva
+`trackingId`, `recipient`, `subject`, `createdAt`, `licenseId`, `installationId`,
+`status=CREATED`. CREATED significa registro creado, sin confirmar envío.
+Un PutItem condicional evita sobrescrituras; no se crean eventos OPEN ni contadores.
+
+La ruta comparte API Gateway con activación y usa una Lambda y un rol propios:
+solo `dynamodb:PutItem` sobre la tabla de tracking, lectura del secreto JWT existente
+y escritura en su grupo de logs. La tabla es bajo demanda y se retiene al retirar
+el stack. El output `TrackingTableName` identifica su nombre físico.
+
+La autorización está aislada en `authorization.ts` y reutiliza `verifyToken` sin
+duplicar criptografía. Entrega únicamente la identidad validada al servicio y
+permite añadir una comprobación de revocación posteriormente. **Revocar una licencia
+no invalida JWT existentes**; siguen autorizando creación hasta su expiración.
+
+Errores: **400** `INVALID_REQUEST`, **401** `UNAUTHORIZED` (token ausente, inválido o
+expirado), **500** `SERVICE_UNAVAILABLE`. Fallos de Secrets Manager o DynamoDB son
+500 sin detalles internos. Respuestas con `no-store`; logs estructurados contienen
+solo requestId, resultado y trackingId en éxito. No se registran tokens ni PII.
+
+Configuración adicional:
+
+- `TRACKING_TABLE_NAME`: inyectada por CDK en CreateTracking Lambda.
+- `JWT_SECRET_ARN`: el mismo secreto de activación, nunca su valor.
+- `TRACKING_BASE_URL`: opcional, por defecto `https://tracking.cesaragudelo.com`,
+  centralizado en `trackingConfig.ts`. Acepta HTTPS o HTTP localhost para desarrollo.
+  Definirla al ejecutar CDK la inyecta en Lambda; elimina barras finales.
+- La extensión reutiliza `config.apiBaseUrl` y `VITE_ACTIVATION_API_URL` para ambas
+  rutas. Se conserva el nombre de variable existente por compatibilidad; su valor
+  es la base pública de API Gateway, sin `/api/activate` ni `/api/tracking`.
+
+`createTrackingClient().createTracking({ recipient, subject })` lee la autorización
+almacenada desde un contexto confiable (popup o service worker), envía Bearer y
+valida la respuesta compartida. Sin autorización local vigente no hace fetch.
+Mapea 401 a una indicación de reactivación y los errores de red a indisponibilidad.
+Es una API reusable sin invocaciones desde Gmail, checkbox o Send; no se añade UI.
+Los reintentos manuales crean registros nuevos; no se implementa idempotencia.
+
+### Validación sin AWS
+
+```sh
+npm run build
+npm run lint
+npm test
+npm run format:check
+npm run synth --workspace=@email-tracker/cdk -- --no-lookups
+```
+
+Los tests ejercitan JWT reales firmados con claves de prueba, contratos, handler,
+servicio, repositorio con DynamoDB mockeado, cliente con storage/fetch mockeados e IAM
+sintetizado. No requieren cuenta AWS. Synth genera CloudFormation, sin desplegar.
+Carga la extensión compilada y comprueba manualmente que alternar Track email no
+produce solicitudes a `/api/tracking` y que el contenido del correo se conserva.
+
+### Validación opcional en AWS
+
+1. Desplegar el stack `EmailTrackerActivation` con los comandos de deployment ya
+   documentados: añade tabla EmailTracking, Lambda CreateTracking, logs, IAM e
+   integración/ruta en la API existente. No se configura el dominio de tracking.
+2. Crear una licencia con el CLI existente usando `--write` y `LicenseTableName`.
+3. Activar la extensión o solicitar un JWT con un installationId UUID:
+
+```sh
+curl -X POST "$API_BASE_URL/api/activate" \
+  -H 'Content-Type: application/json' \
+  --data '{"activationCode":"CODIGO_DE_LICENCIA","installationId":"8a73e54e-c33f-40ca-a2dc-06626851744d"}'
+```
+
+4. Usar el `accessToken` devuelto como variable local `JWT`, sin guardarlo en el
+   repositorio ni compartirlo. `API_BASE_URL` es el output `ApiUrl`:
+
+```sh
+curl -i -X POST "$API_BASE_URL/api/tracking" \
+  -H "Authorization: Bearer $JWT" \
+  -H 'Content-Type: application/json' \
+  --data '{"recipient":"client@example.com","subject":"Technical Interview Follow-up"}'
+```
+
+5. Esperar 201 y comprobar en la tabla el registro EMAIL con CREATED e identidad
+   de la licencia/instalación. Repetir sin Authorization debe producir 401; con JWT
+   válido y recipient inválido, 400. No abrir la trackingUrl como prueba de pixel:
+   ese endpoint aún no está implementado.
