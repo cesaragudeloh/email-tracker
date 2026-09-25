@@ -8,7 +8,7 @@ import type { TrackingRepository } from './trackingRepository.js';
 
 export class TrackingService {
   constructor(
-    private readonly repository: TrackingRepository,
+    private readonly repository: Pick<TrackingRepository, 'create'>,
     private readonly trackingBaseUrl: string,
   ) {}
 

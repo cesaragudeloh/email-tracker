@@ -184,8 +184,8 @@ con `VITE_ACTIVATION_API_URL`) y el storage de activación; obtiene el JWT y env
 `Authorization: Bearer` a `POST /api/tracking`. Sin autorización local vigente no
 hace fetch. Los contratos request/response se validan con el paquete shared.
 
-Devuelve `{ trackingId, trackingUrl, createdAt }`; `trackingUrl` es futura, sin un
-endpoint de pixel implementado. Un 401 solicita reactivación; errores de validación,
+Devuelve `{ trackingId, trackingUrl, createdAt }`; `trackingUrl` apunta al pixel público implementado en el Milestone 7;
+el dominio de producción requiere configuración externa al milestone. Un 401 solicita reactivación; errores de validación,
 red o backend se convierten en mensajes seguros. El backend verifica la firma y
 expiración: el estado local nunca concede permisos por sí mismo.
 
@@ -193,3 +193,15 @@ Este cliente no se invoca automáticamente y no está conectado al checkbox ni a
 Send. Gmail no extrae destinatario/asunto ni modifica el correo. Los tests unitarios
 usan storage y fetch mockeados. Consulta el README raíz para el ejemplo curl,
 síntesis local, diseño CREATED y limitación de revocación de JWT de hasta 24 horas.
+
+## Milestone 7: endpoint público del pixel
+
+El backend implementa `GET /o/{trackingId}` sin JWT. Registra cada carga como OPEN
+con timestamp, IP observada y User-Agent raw, y entrega un PNG transparente de 1x1.
+Una carga no prueba lectura humana: IP y User-Agent pueden ser de proxies. Todavía
+no hay geolocalización ni parsing de navegador/dispositivo.
+
+No cambia la extensión: Gmail no inserta el pixel, no intercepta Send y el checkbox
+no llama APIs. El README raíz documenta validación por curl y la política de
+resiliencia: tras confirmar EMAIL, un fallo al guardar OPEN devuelve igualmente
+200 PNG y puede perder ese evento; un fallo de lectura devuelve 500 seguro.

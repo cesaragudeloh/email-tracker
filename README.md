@@ -1,8 +1,8 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 6 añade creación de registros de tracking
-a la activación por licencia. El popup obtiene una autorización firmada
-por el backend antes de mostrar `Activated`. Todavía no se detectan aperturas ni se modifica el correo.
+Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 7 añade un pixel público y eventos OPEN
+a la creación de tracking y activación por licencia. El popup obtiene una autorización firmada
+por el backend antes de mostrar `Activated`. Una carga del pixel registra una apertura detectada; Gmail todavía no modifica el correo.
 
 ## Arquitectura implementada
 
@@ -22,11 +22,11 @@ Cliente de extensión → POST /api/tracking → CreateTracking Lambda
 - `apps/extension`: Manifest V3, TypeScript strict, Vite, HTML y CSS, sin React.
 - `services/tracking-api`: handler, servicio, repositorio DynamoDB, firma JWT y CLI.
 - `packages/shared`: contratos Zod, normalización y tipos compartidos.
-- `infrastructure/cdk`: dos tablas, un secreto, dos Lambdas Node.js 22 y dos rutas HTTP.
+- `infrastructure/cdk`: dos tablas, un secreto, tres Lambdas Node.js 22 y tres rutas HTTP.
 - Herramientas: Node.js 24 y npm 11 para desarrollo, ESLint, Prettier y Vitest.
 
 La infraestructura está preparada, **no desplegada**. No se configura dominio,
-certificado, authorizer externo ni Cognito. La autorización de tracking se verifica en Lambda.
+certificado, authorizer externo ni Cognito. La creación de tracking verifica JWT en Lambda; el pixel es público.
 
 ## Instalación y validación local
 
@@ -235,10 +235,10 @@ El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
 acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
 sustituyen esa validación de deployment.
 
-## Fuera del Milestone 6
+## Fuera del Milestone 7
 
-No se implementan pixel, eventos OPEN, consulta de tracking, historial, Outlook,
-geolocalización, User-Agent, dashboard ni link tracking. Gmail conserva su adapter
+No se implementan consulta de tracking, historial, Outlook, geolocalización,
+parsing de User-Agent, dashboard ni link tracking. Gmail conserva su adapter
 y checkbox del Milestone 5: no se conecta a la API, no modifica el body ni intercepta Send.
 
 Referencias: [transacciones e IAM de DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html),
@@ -270,12 +270,13 @@ Devuelve **201** tras persistir:
 }
 ```
 
-`trackingUrl` prepara una URL futura: **GET /o/{trackingId} todavía no existe**.
+`trackingUrl` apunta a `GET /o/{trackingId}`, implementado en el Milestone 7.
+El dominio de producción todavía requiere configuración y despliegue fuera de este alcance.
 `TrackingService` genera el UUID con `crypto.randomUUID()` en backend. La tabla
 independiente `EmailTracking` usa `PK=TRACKING#{trackingId}`, `SK=EMAIL` y conserva
 `trackingId`, `recipient`, `subject`, `createdAt`, `licenseId`, `installationId`,
 `status=CREATED`. CREATED significa registro creado, sin confirmar envío.
-Un PutItem condicional evita sobrescrituras; no se crean eventos OPEN ni contadores.
+Un PutItem condicional evita sobrescrituras; crear EMAIL no crea eventos OPEN ni contadores.
 
 La ruta comparte API Gateway con activación y usa una Lambda y un rol propios:
 solo `dynamodb:PutItem` sobre la tabla de tracking, lectura del secreto JWT existente
@@ -352,5 +353,119 @@ curl -i -X POST "$API_BASE_URL/api/tracking" \
 
 5. Esperar 201 y comprobar en la tabla el registro EMAIL con CREATED e identidad
    de la licencia/instalación. Repetir sin Authorization debe producir 401; con JWT
-   válido y recipient inválido, 400. No abrir la trackingUrl como prueba de pixel:
-   ese endpoint aún no está implementado.
+   válido y recipient inválido, 400. Para probar el pixel en la URL de API Gateway,
+   seguir la validación del Milestone 7.
+
+## Milestone 7: pixel público y eventos OPEN
+
+`GET /o/{trackingId}` no requiere JWT, Authorization ni API key: lo consume el
+cliente de correo. `openTrackingHandler` traduce HTTP, `OpenTrackingService` valida
+UUID con Zod, confirma EMAIL y construye el evento; `TrackingRepository` ejecuta
+GetItem consistente y PutItem sobre la misma tabla `EmailTracking`. Se acepta el
+UUID únicamente de `pathParameters` y se normaliza a minúsculas para la clave.
+
+Cada carga crea un registro independiente, incluso en el mismo milisegundo:
+
+```text
+PK = TRACKING#{trackingId}
+SK = OPEN#{openedAt}#{eventId}
+```
+
+```json
+{
+  "eventId": "550e8400-e29b-41d4-a716-446655440000",
+  "trackingId": "8a73e54e-c33f-40ca-a2dc-06626851744d",
+  "eventType": "OPEN",
+  "openedAt": "2026-09-24T21:15:22.123Z",
+  "ip": "192.0.2.1",
+  "userAgent": "Raw mail client User-Agent"
+}
+```
+
+`eventId` se genera con `crypto.randomUUID()`; `openedAt` es ISO UTC. La IP procede
+exclusivamente de `requestContext.http.sourceIp` de API Gateway HTTP API v2, sin
+fallback a X-Forwarded-For. User-Agent se conserva raw con búsqueda de header
+insensible a mayúsculas. Ausencias se guardan como `null`. No se copian destinatario,
+asunto ni contenido al evento. EMAIL mantiene CREATED; no hay contadores ni deduplicación.
+
+| Condición                              | Respuesta                 | Escritura OPEN           |
+| -------------------------------------- | ------------------------- | ------------------------ |
+| UUID ausente o inválido                | 400 `INVALID_TRACKING_ID` | Ninguna                  |
+| UUID válido sin EMAIL                  | 404 `NOT_FOUND`           | Ninguna                  |
+| GetItem falla antes de confirmar EMAIL | 500 `SERVICE_UNAVAILABLE` | Ninguna                  |
+| EMAIL existe y PutItem funciona        | 200 `image/png`           | Evento independiente     |
+| EMAIL existe y PutItem falla           | **200 `image/png`**       | Puede perderse el evento |
+
+**Política de resiliencia:** solo tras confirmar EMAIL se tolera un fallo de
+persistencia. Se registra `OPEN_WRITE_FAILED` con requestId, trackingId, eventId,
+eventType y `persistenceSuccess=false`, sin error AWS, stack trace, IP, User-Agent
+ni secretos. El destinatario recibe el mismo PNG que en éxito. Se acepta perder
+ese evento; no hay colas, reintentos de aplicación ni tareas en segundo plano.
+La Lambda usa un intento SDK por operación y timeouts de conexión de 500 ms y
+petición de 1500 ms con rechazo al vencer, inferiores al timeout Lambda de 10 s.
+GetItem fallido nunca se interpreta como existencia ni como ausencia del EMAIL.
+No hay transacción entre lectura y escritura.
+
+El PNG RGBA transparente de 1x1 está precomputado en `pixel.ts`. La respuesta proxy
+Lambda contiene body base64 e `isBase64Encoded: true`; HTTP API lo entrega como
+bytes PNG al cliente. No se genera la imagen por request. Headers:
+
+```http
+Content-Type: image/png
+Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+Pragma: no-cache
+Expires: 0
+```
+
+La Lambda dedicada `OpenTrackingFunction` recibe solo `TRACKING_TABLE_NAME` y tiene
+GetItem/PutItem sobre EmailTracking y escritura en su grupo de logs. No tiene acceso
+a licencias ni Secrets Manager, Scan, Query, UpdateItem o DeleteItem. No se añaden
+tablas, dominio personalizado, Route53, ACM, CloudFront o servicios externos.
+
+Una carga significa **Apertura detectada**, no prueba de lectura humana. IP y
+User-Agent pueden corresponder a proxies; Gmail puede cachear imágenes, Apple Mail
+puede precargarlas y otros clientes pueden bloquearlas. Los headers anti-cache no
+garantizan que un proxy solicite el pixel en cada apertura. No hay geolocalización,
+parsing de navegador/sistema/dispositivo ni detección de proxies en este milestone.
+Gmail todavía no inserta el pixel ni intercepta Send.
+
+### Validación local del pixel (sin AWS)
+
+```sh
+npm run build
+npm run lint
+npm test
+npm run format:check
+npm run synth --workspace=@email-tracker/cdk -- --no-lookups
+```
+
+Vitest comprueba firma PNG, CRC de chunks, dimensiones 1x1, datos RGBA con alpha 0,
+base64 y headers; verifica 400/404/500, cinco eventos simultáneos independientes y
+que un fallo PutItem devuelve exactamente el mismo 200 PNG y genera log seguro.
+DynamoDB está mockeado. CDK synth no despliega recursos. No se incluye servidor
+local HTTP ni se realizan tests E2E.
+
+### Validación opcional con AWS — no ejecutada automáticamente
+
+1. Desplegar `EmailTrackerActivation` con el flujo de deployment documentado arriba.
+   Añade la Lambda del pixel, su rol/logs y la ruta pública a la API existente.
+2. Crear licencia con el CLI existente (`--write` sobre LicenseTableName).
+3. Activar la extensión u obtener JWT con `POST /api/activate`.
+4. Crear EMAIL con `POST /api/tracking` y Bearer, usando el ejemplo anterior.
+5. Copiar `trackingId` y usar el output `ApiUrl` como `API_BASE_URL`. No hace falta
+   Authorization para el pixel:
+
+```sh
+curl -i "$API_BASE_URL/o/$TRACKING_ID" --output /tmp/pixel-response.http
+# Alternativa para inspeccionar headers y conservar solo PNG en un archivo:
+curl -D - "$API_BASE_URL/o/$TRACKING_ID" --output /tmp/tracking-pixel.png
+```
+
+6. Comprobar HTTP 200, Content-Type image/png y headers anti-cache. Cada uno de los
+   dos comandos anteriores es una carga independiente.
+7. Revisar DynamoDB: `PK=TRACKING#{trackingId}` y
+   `SK=OPEN#{openedAt}#{eventId}`, además del EMAIL existente.
+8. Repetir llamadas varias veces y comprobar varios eventos OPEN con distintos IDs.
+   La IP observada puede ser la del proxy/red de salida del cliente usado para curl.
+
+No se despliega AWS ni se configura el dominio de producción durante la validación local.

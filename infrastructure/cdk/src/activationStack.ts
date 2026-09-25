@@ -154,6 +154,44 @@ export class ActivationStack extends Stack {
       methods: [HttpMethod.POST],
       integration: new HttpLambdaIntegration('CreateTracking', createTracking),
     });
+    const pixelLogs = new LogGroup(this, 'OpenTrackingLogs', {
+      retention: RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    const pixelRole = new Role(this, 'OpenTrackingRole', {
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
+    });
+    pixelLogs.grantWrite(pixelRole);
+    pixelRole.addToPolicy(
+      new PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        resources: [trackingTable.tableArn],
+      }),
+    );
+    const pixel = new Function(this, 'OpenTrackingFunction', {
+      runtime: Runtime.NODEJS_22_X,
+      code:
+        props.lambdaCode ??
+        Code.fromAsset(
+          fileURLToPath(
+            new URL(
+              '../../../services/tracking-api/build/lambda/',
+              import.meta.url,
+            ),
+          ),
+        ),
+      handler: 'openTrackingPixel.handler',
+      timeout: Duration.seconds(10),
+      memorySize: 256,
+      role: pixelRole,
+      logGroup: pixelLogs,
+      environment: { TRACKING_TABLE_NAME: trackingTable.tableName },
+    });
+    api.addRoutes({
+      path: '/o/{trackingId}',
+      methods: [HttpMethod.GET],
+      integration: new HttpLambdaIntegration('OpenTracking', pixel),
+    });
     new CfnOutput(this, 'TrackingTableName', {
       value: trackingTable.tableName,
     });

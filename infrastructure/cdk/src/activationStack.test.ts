@@ -13,8 +13,8 @@ beforeAll(() => {
   );
 }, 60000);
 it('creates activation and tracking routes with separate Lambdas', () => {
-  result.resourceCountIs('AWS::Lambda::Function', 2);
-  result.resourceCountIs('AWS::ApiGatewayV2::Route', 2);
+  result.resourceCountIs('AWS::Lambda::Function', 3);
+  result.resourceCountIs('AWS::ApiGatewayV2::Route', 3);
   result.hasResourceProperties('AWS::ApiGatewayV2::Route', {
     RouteKey: 'POST /api/activate',
   });
@@ -85,5 +85,41 @@ it('scopes tracking DynamoDB access to PutItem on its dedicated table', () => {
     Environment: {
       Variables: Match.objectLike({ TRACKING_TABLE_NAME: { Ref: tableId } }),
     },
+  });
+});
+
+it('creates a public pixel route with a dedicated Lambda and no secret environment', () => {
+  result.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+    RouteKey: 'GET /o/{trackingId}',
+    AuthorizationType: 'NONE',
+  });
+  const tables = result.findResources('AWS::DynamoDB::Table');
+  const tableId = Object.keys(tables).find((id) =>
+    id.startsWith('EmailTracking'),
+  )!;
+  result.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'openTrackingPixel.handler',
+    Environment: { Variables: { TRACKING_TABLE_NAME: { Ref: tableId } } },
+  });
+});
+it('grants pixel only GetItem/PutItem on EmailTracking and log writes', () => {
+  const tables = result.findResources('AWS::DynamoDB::Table');
+  const tableId = Object.keys(tables).find((id) =>
+    id.startsWith('EmailTracking'),
+  )!;
+  const policies = result.findResources('AWS::IAM::Policy');
+  const policyId = Object.keys(policies).find((id) =>
+    id.startsWith('OpenTrackingRole'),
+  )!;
+  const statements = policies[policyId].Properties.PolicyDocument.Statement;
+  expect(statements).toHaveLength(2);
+  expect(statements[0].Action).toEqual([
+    'logs:CreateLogStream',
+    'logs:PutLogEvents',
+  ]);
+  expect(statements[1]).toEqual({
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': [tableId, 'Arn'] },
   });
 });
