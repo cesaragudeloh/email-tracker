@@ -1,7 +1,7 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 8 añade consulta protegida, contador derivado e historial de eventos OPEN
-a la creación de tracking, pixel público y activación por licencia. El popup obtiene una autorización firmada
+Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 9 conecta Send de Gmail con creación de tracking cuando Track email
+está ON, sobre la consulta protegida, historial, pixel público y activación existentes. El popup obtiene una autorización firmada
 por el backend antes de mostrar `Activated`. Una carga del pixel registra una apertura detectada; Gmail todavía no modifica el correo.
 
 ## Arquitectura implementada
@@ -238,11 +238,12 @@ El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
 acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
 sustituyen esa validación de deployment.
 
-## Fuera del Milestone 8
+## Fuera del Milestone 9
 
 No se implementan UI de historial, Outlook, geolocalización,
 parsing de User-Agent, dashboard ni link tracking. Gmail conserva su adapter
-y checkbox del Milestone 5: no se conecta a la API, no modifica el body ni intercepta Send.
+y checkbox del Milestone 5: ahora intercepta Send y crea tracking mediante el worker,
+pero no modifica el body ni inserta el pixel.
 
 Referencias: [transacciones e IAM de DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html),
 [almacenamiento de extensiones Chromium](https://developer.chrome.com/docs/extensions/reference/api/storage).
@@ -311,7 +312,7 @@ Configuración adicional:
 almacenada desde un contexto confiable (popup o service worker), envía Bearer y
 valida la respuesta compartida. Sin autorización local vigente no hace fetch.
 Mapea 401 a una indicación de reactivación y los errores de red a indisponibilidad.
-Es una API reusable sin invocaciones desde Gmail, checkbox o Send; no se añade UI.
+Desde el Milestone 9 Gmail la invoca mediante el worker al intentar Send con Track ON.
 Los reintentos manuales crean registros nuevos; no se implementa idempotencia.
 
 ### Validación sin AWS
@@ -430,7 +431,7 @@ User-Agent pueden corresponder a proxies; Gmail puede cachear imágenes, Apple M
 puede precargarlas y otros clientes pueden bloquearlas. Los headers anti-cache no
 garantizan que un proxy solicite el pixel en cada apertura. No hay geolocalización,
 parsing de navegador/sistema/dispositivo ni detección de proxies en este milestone.
-Gmail todavía no inserta el pixel ni intercepta Send.
+Gmail todavía no inserta el pixel; el Milestone 9 intercepta Send para crear tracking.
 
 ### Validación local del pixel (sin AWS)
 
@@ -556,7 +557,7 @@ Los logs contienen requestId, trackingId y resultado, nunca JWT, IP/User-Agent,
 destinatario, asunto o errores internos. No se añaden tablas ni dominios.
 
 No hay geolocalización, parsing de navegador/OS/dispositivo, detección de proxies
-o Apple MPP, Outlook, UI de historial, Gmail Send, inserción automática de pixel,
+o Apple MPP, Outlook, UI de historial, inserción automática de pixel,
 link tracking ni dashboard.
 
 ### Validación del Milestone 8 sin AWS
@@ -595,3 +596,17 @@ Verificar OPEN_DETECTED, openCount igual al número de eventos, historial ascend
 firstOpenedAt/lastOpenedAt y metadata. Probar JWT de otra licencia: 404 idéntico al
 UUID inexistente. Otro dispositivo de la misma licencia debe recibir 200. Sin
 Bearer: 401; UUID inválido: 400. No se despliega automáticamente.
+
+## Milestone 9: Gmail Send y creación de tracking
+
+Send con Track ON se detiene temporalmente para extraer primer To válido y asunto,
+llamar POST /api/tracking desde el service worker y asociar la respuesta al compose
+en memoria. Después se reanuda el botón nativo. OFF pasa sin API; errores o espera
+superior a 20 segundos reanudan sin tracking con un warning fijo. El JWT no cruza
+al content script. No se modifica cuerpo/asunto ni se inserta pixel: estos correos
+todavía no permiten detectar aperturas reales.
+
+Ver [documentación de la extensión](apps/extension/README.md#milestone-9-crear-tracking-antes-de-send-en-gmail)
+para interceptación, reanudación, duplicados, destinatarios múltiples, limitaciones
+DOM y validación manual OFF/ON/error en Chrome. Los tests son unitarios con mocks;
+no se validó una sesión Gmail real ni se desplegó AWS. Sin infraestructura nueva.

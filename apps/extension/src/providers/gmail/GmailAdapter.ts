@@ -1,3 +1,4 @@
+import { GmailSendController } from './GmailSendController.js';
 import type {
   ComposeDetected,
   EmailProviderAdapter,
@@ -14,10 +15,17 @@ export class GmailAdapter implements EmailProviderAdapter {
   private readonly detected = new WeakSet<HTMLElement>();
   private readonly trackingControls = new GmailTrackingControls();
 
+  private readonly sendController: GmailSendController;
+
   constructor(
     private readonly document: Document,
     private readonly onComposeDetected: ComposeDetected,
-  ) {}
+  ) {
+    this.sendController = new GmailSendController(
+      document,
+      this.trackingControls,
+    );
+  }
 
   canHandle(location: Pick<Location, 'hostname' | 'protocol'>): boolean {
     return (
@@ -27,6 +35,7 @@ export class GmailAdapter implements EmailProviderAdapter {
 
   start(): void {
     if (this.observer) return;
+    this.sendController.start();
     this.observer = new MutationObserver((records) => {
       const candidates = new Set<HTMLElement>();
       for (const record of records) {
@@ -56,6 +65,7 @@ export class GmailAdapter implements EmailProviderAdapter {
   }
 
   stop(): void {
+    this.sendController.stop();
     this.observer?.disconnect();
     this.observer = undefined;
   }

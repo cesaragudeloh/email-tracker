@@ -371,7 +371,7 @@ describe('GmailAdapter', () => {
     expect(node.innerHTML).toBe(original);
   });
 
-  it('preserves native Send click behavior when the checkbox changes', () => {
+  it('preserves native Send click behavior when tracking is switched back OFF', () => {
     const node = compose();
     const send = node.querySelector<HTMLElement>('[data-tooltip]')!;
     const clicked = vi.fn();
@@ -380,6 +380,7 @@ describe('GmailAdapter', () => {
     adapter.start();
     toggleInput(node).click();
     expect(clicked).not.toHaveBeenCalled();
+    toggleInput(node).click();
     send.click();
     expect(clicked).toHaveBeenCalledTimes(1);
   });

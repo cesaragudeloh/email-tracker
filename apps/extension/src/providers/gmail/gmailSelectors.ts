@@ -1,8 +1,17 @@
+import {
+  createTrackingRequestSchema,
+  type CreateTrackingRequest,
+} from '@email-tracker/shared';
 // Gmail no publica un contrato DOM: mantener estas estrategias juntas.
 // La detección de compose no depende de etiquetas traducidas.
 export const gmailSelectors = {
   dialog: '[role="dialog"]',
   subject: 'input[name="subjectbox"]',
+  toInput: 'input[name="to"], textarea[name="to"]',
+  toRegion: '[data-name="to"], [data-recipient-type="to"]',
+  recipientChip: '[email], [data-hovercard-id]',
+  recipientRow: 'tr, [role="row"]',
+  disabled: '[disabled], [aria-disabled="true"]',
   editor: '[role="textbox"][contenteditable="true"]',
   action:
     '[role="button"][data-tooltip], button[data-tooltip], [role="button"][aria-label], button[aria-label]',
@@ -26,9 +35,9 @@ export interface GmailTogglePlacement {
   after: Element | null;
 }
 
-export function findGmailTogglePlacement(
+export function findGmailSendButton(
   dialog: HTMLElement,
-): GmailTogglePlacement | undefined {
+): HTMLElement | undefined {
   const actions = Array.from(
     dialog.querySelectorAll<HTMLElement>(gmailSelectors.action),
   ).filter(
@@ -53,8 +62,14 @@ export function findGmailTogglePlacement(
         /^(?:Send|Enviar)(?:\s*\([^)]*\))?$/i.test(value),
       ),
     );
-  if (!send) return;
+  return send;
+}
 
+export function findGmailTogglePlacement(
+  dialog: HTMLElement,
+): GmailTogglePlacement | undefined {
+  const send = findGmailSendButton(dialog);
+  if (!send) return;
   const cell = send.closest<HTMLElement>(gmailSelectors.cell);
   const group = send.closest<HTMLElement>(gmailSelectors.group);
   const anchor =
@@ -82,4 +97,57 @@ export function isGmailCompose(dialog: HTMLElement): boolean {
       (control) => control.closest(gmailSelectors.dialog) === dialog,
     ),
   );
+}
+
+function ownedBy(dialog: HTMLElement, node: Element): boolean {
+  return (
+    node.closest(gmailSelectors.dialog) === dialog &&
+    !node.closest(gmailSelectors.editable)
+  );
+}
+
+export function readGmailMetadata(
+  dialog: HTMLElement,
+): CreateTrackingRequest | undefined {
+  const inputs = Array.from(
+    dialog.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+      gmailSelectors.toInput,
+    ),
+  ).filter((node) => ownedBy(dialog, node));
+  const regions = new Set<Element>(
+    Array.from(dialog.querySelectorAll(gmailSelectors.toRegion)).filter(
+      (node) => ownedBy(dialog, node),
+    ),
+  );
+  for (const input of inputs) {
+    const row = input.closest(gmailSelectors.recipientRow);
+    if (row && ownedBy(dialog, row)) regions.add(row);
+  }
+  const candidates: string[] = [];
+  for (const region of regions) {
+    for (const chip of region.querySelectorAll(gmailSelectors.recipientChip)) {
+      if (ownedBy(dialog, chip))
+        candidates.push(
+          chip.getAttribute('email') ??
+            chip.getAttribute('data-hovercard-id') ??
+            '',
+        );
+    }
+  }
+  candidates.push(...inputs.map((input) => input.value));
+  const subject =
+    Array.from(
+      dialog.querySelectorAll<HTMLInputElement>(gmailSelectors.subject),
+    ).find((node) => ownedBy(dialog, node))?.value ?? '';
+  for (const candidate of candidates) {
+    for (const part of candidate.split(/[,;]+/)) {
+      const recipient = (/<([^<>]+)>/.exec(part)?.[1] ?? part).trim();
+      const parsed = createTrackingRequestSchema.safeParse({
+        recipient,
+        subject,
+      });
+      if (parsed.success) return parsed.data;
+    }
+  }
+  return undefined;
 }

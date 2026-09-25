@@ -1,3 +1,5 @@
+import { createTrackingClient } from './api/trackingClient.js';
+import { createTrackingMessageListener } from './api/trackingMessages.js';
 import { createActivationStorage } from './activation/storage.js';
 
 const storage = createActivationStorage();
@@ -5,3 +7,10 @@ const storage = createActivationStorage();
 void storage.getInstallationId().catch(() => {
   console.warn(JSON.stringify({ event: 'activation_storage_unavailable' }));
 });
+
+chrome.runtime.onMessage.addListener(
+  createTrackingMessageListener(
+    (request) => createTrackingClient().createTracking(request),
+    chrome.runtime.id,
+  ),
+);
