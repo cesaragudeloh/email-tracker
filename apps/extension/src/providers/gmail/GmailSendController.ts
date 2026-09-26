@@ -35,7 +35,7 @@ export class GmailSendController {
     private readonly document: Document,
     private readonly controls: GmailTrackingControls,
     private readonly create: CreateTracking = requestTracking,
-    private readonly warn: () => void = () => console.warn(warning),
+    private readonly warn: () => void = () => console.info(warning),
     private readonly created: () => void = () =>
       console.info('Email Tracker: tracking pixel inserted'),
     private readonly pixelWarning: () => void = () =>
