@@ -18,7 +18,7 @@ function fixture(recipient = 'first@example.com', subject = 'Current subject') {
   compose.setAttribute('role', 'dialog');
   compose.innerHTML =
     '<input name="subjectbox"><table><tbody><tr><td><input name="to"></td></tr></tbody></table>' +
-    '<div role="textbox" contenteditable="true"><b>Private body</b></div>' +
+    '<div role="textbox" contenteditable="true"><b>Private body</b><div class="signature">Signature <a href="https://example.com">Link</a><img src="https://example.com/signature.png"></div></div>' +
     '<footer><div role="group"><div role="button" tabindex="0" data-tooltip="Enviar (Ctrl-Enter)"><span>Send</span></div></div></footer>';
   compose.querySelector<HTMLInputElement>('[name="to"]')!.value = recipient;
   compose.querySelector<HTMLInputElement>('[name="subjectbox"]')!.value =
@@ -32,12 +32,14 @@ function setup(compose = fixture()) {
   const create = vi.fn().mockResolvedValue(result);
   const warn = vi.fn();
   const created = vi.fn();
+  const pixelWarning = vi.fn();
   const controller = new GmailSendController(
     document,
     controls,
     create,
     warn,
     created,
+    pixelWarning,
   );
   controllers.push(controller);
   controller.start();
@@ -49,6 +51,7 @@ function setup(compose = fixture()) {
   send.addEventListener('click', native);
   return {
     compose,
+    pixelWarning,
     controls,
     create,
     warn,
@@ -100,6 +103,7 @@ it('OFF allows native Send immediately without calling createTracking', async ()
   send.click();
   expect(native).toHaveBeenCalledOnce();
   await flush();
+  expect(document.querySelector('[data-email-tracker-id]')).toBeNull();
   expect(create).not.toHaveBeenCalled();
   expect(native.mock.calls[0][0].defaultPrevented).toBe(false);
 });
@@ -233,6 +237,16 @@ it('keeps two compose contexts and metadata independent', async () => {
   ]);
   expect(first.controller.getTracking(first.compose)).toEqual(result);
   expect(first.controller.getTracking(secondCompose)).toEqual(secondResult);
+  expect(
+    first.compose
+      .querySelector('img[data-email-tracker-id]')
+      ?.getAttribute('data-email-tracker-id'),
+  ).toBe(result.trackingId);
+  expect(
+    secondCompose
+      .querySelector('img[data-email-tracker-id]')
+      ?.getAttribute('data-email-tracker-id'),
+  ).toBe(secondResult.trackingId);
 });
 it('double click and bubbling produce one in-flight request and one resumed Send', async () => {
   const { toggle, send, create, native } = setup();
@@ -281,6 +295,7 @@ it.each([
     expect(native).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledExactlyOnceWith();
     expect(controller.getTracking(compose)).toBeUndefined();
+    expect(compose.querySelector('[data-email-tracker-id]')).toBeNull();
     send.click();
     await flush();
     expect(create).toHaveBeenCalledOnce();
@@ -343,17 +358,21 @@ it('missing Send after request releases the lock and warns without throwing', as
   await flush();
   expect(warn).toHaveBeenCalledOnce();
 });
-it('never modifies body/subject/native Send, inserts pixels or persists tracking', async () => {
+it('preserves original nodes/subject/native Send and never stores body or pixel', async () => {
   const { toggle, send, compose, create } = setup();
   const editor = compose.querySelector('[contenteditable]')!;
-  const original = editor.outerHTML;
+  const original = Array.from(editor.childNodes);
+  const markup = original.map((node) => (node as Element).outerHTML);
   const button = send.outerHTML;
   toggle.click();
   send.click();
   await flush();
-  expect(editor.outerHTML).toBe(original);
+  expect(Array.from(editor.childNodes).slice(0, -1)).toEqual(original);
+  expect(original.map((node) => (node as Element).outerHTML)).toEqual(markup);
   expect(send.outerHTML).toBe(button);
-  expect(compose.querySelector('img')).toBeNull();
+  expect(compose.querySelectorAll('img[data-email-tracker-id]')).toHaveLength(
+    1,
+  );
   expect(
     compose.querySelector<HTMLInputElement>('[name="subjectbox"]')!.value,
   ).toBe('Current subject');
@@ -371,6 +390,11 @@ it.each([{ ctrlKey: true }, { metaKey: true }])(
       { key: 'Enter', ...modifiers },
     );
     expect(event.defaultPrevented).toBe(true);
+    native.mockImplementation(() =>
+      expect(
+        compose.querySelectorAll('img[data-email-tracker-id]'),
+      ).toHaveLength(1),
+    );
     expect(native).not.toHaveBeenCalled();
     await flush();
     expect(native).toHaveBeenCalledOnce();
@@ -522,3 +546,104 @@ it.each(['Senden (Ctrl-Enter)', '送信（⌘Enter）'])(
     expect(native).toHaveBeenCalledOnce();
   },
 );
+
+it('inserts before native resume and reuses exactly one pixel for mixed repeated Send', async () => {
+  const { compose, toggle, send, native, create } = setup(
+    fixture('first@example.com; second@example.com'),
+  );
+  native.mockImplementation(() =>
+    expect(compose.querySelectorAll('img[data-email-tracker-id]')).toHaveLength(
+      1,
+    ),
+  );
+  toggle.click();
+  key(compose.querySelector<HTMLElement>('[contenteditable]')!, {
+    key: 'Enter',
+    ctrlKey: true,
+  });
+  send.click();
+  await flush();
+  const pixel = compose.querySelector('img[data-email-tracker-id]');
+  send.click();
+  await flush();
+  expect(compose.querySelector('img[data-email-tracker-id]')).toBe(pixel);
+  expect(create).toHaveBeenCalledOnce();
+  expect(native).toHaveBeenCalledTimes(2);
+});
+it.each(['missing body', 'DOM exception', 'invalid URL'])(
+  'resumes without a pixel for %s and retains context for retry',
+  async (failure) => {
+    const { compose, toggle, send, create, native, pixelWarning, controller } =
+      setup();
+    const body = compose.querySelector<HTMLElement>('[contenteditable]')!;
+    let restore = () => {};
+    if (failure === 'missing body') {
+      body.remove();
+      restore = () => compose.append(body);
+    }
+    if (failure === 'DOM exception') {
+      const spy = vi.spyOn(body, 'appendChild').mockImplementation(() => {
+        throw new Error('DOM failure');
+      });
+      restore = () => spy.mockRestore();
+    }
+    const response =
+      failure === 'invalid URL'
+        ? { ...result, trackingUrl: 'http://example.com/o/test' }
+        : result;
+    create.mockResolvedValue(response);
+    toggle.click();
+    send.click();
+    await flush();
+    expect(native).toHaveBeenCalledOnce();
+    expect(pixelWarning).toHaveBeenCalledExactlyOnceWith();
+    expect(compose.querySelector('[data-email-tracker-id]')).toBeNull();
+    expect(controller.getTracking(compose)).toEqual(response);
+    restore();
+    send.click();
+    await flush();
+    expect(create).toHaveBeenCalledOnce();
+    expect(native).toHaveBeenCalledTimes(2);
+    expect(compose.querySelectorAll('[data-email-tracker-id]')).toHaveLength(
+      failure === 'invalid URL' ? 0 : 1,
+    );
+  },
+);
+it('repairs a replaced editor on retry without creating another record', async () => {
+  const { compose, toggle, send, create } = setup();
+  toggle.click();
+  send.click();
+  await flush();
+  const body = compose.querySelector('[contenteditable]')!;
+  const replacement = body.cloneNode(false);
+  body.replaceWith(replacement);
+  send.click();
+  await flush();
+  expect(compose.querySelectorAll('[data-email-tracker-id]')).toHaveLength(1);
+  expect(create).toHaveBeenCalledOnce();
+});
+it('removes an earlier pixel when sending OFF and can reuse tracking when enabled again', async () => {
+  const { compose, toggle, send, create } = setup();
+  toggle.click();
+  send.click();
+  await flush();
+  toggle.click();
+  send.click();
+  expect(compose.querySelector('[data-email-tracker-id]')).toBeNull();
+  toggle.click();
+  send.click();
+  await flush();
+  expect(compose.querySelectorAll('[data-email-tracker-id]')).toHaveLength(1);
+  expect(create).toHaveBeenCalledOnce();
+});
+it('removes stale pixels before a changed-metadata request fails', async () => {
+  const { compose, toggle, send, create } = setup();
+  toggle.click();
+  send.click();
+  await flush();
+  compose.querySelector<HTMLInputElement>('[name="subjectbox"]')!.value = 'New';
+  create.mockRejectedValue(new Error('offline'));
+  send.click();
+  await flush();
+  expect(compose.querySelector('[data-email-tracker-id]')).toBeNull();
+});

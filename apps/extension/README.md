@@ -4,7 +4,7 @@ Una base Manifest V3 para Chrome y Edge, con TypeScript, Vite, HTML y CSS.
 El popup muestra el estado local de autorización, solicita el código si no existe
 un JWT vigente y guarda la respuesta de `POST /api/activate` en `chrome.storage.local`.
 No almacena el código ni muestra el JWT. Incluye un cliente de creación de tracking
-conectado al intento de Send en Gmail cuando Track email está ON (Milestone 9).
+conectado al intento de Send en Gmail cuando Track email está ON, con inserción del pixel antes del envío (Milestone 10).
 
 ## Estructura
 
@@ -74,7 +74,7 @@ La detección y el control visual funcionan con estado `Activated` o `Not activa
 Cada compose recibe un checkbox **Track email**, inicialmente **OFF**, cerca de
 Send. Marcarlo solo cambia su estado temporal. Desde el Milestone 9, un intento
 de Send con ON crea tracking antes de reanudar el envío; marcar el checkbox por
-sí solo no llama al backend. No se insertan píxeles ni se modifica el cuerpo. Outlook
+sí solo no llama al backend. Desde el Milestone 10 se añade el pixel al final del body antes de reanudar Send. Outlook
 mantiene el mensaje inicial del content script, sin adapter.
 
 `GmailAdapter` recibe el documento y un callback. Al iniciar hace un escaneo inicial
@@ -193,7 +193,7 @@ red o backend se convierten en mensajes seguros. El backend verifica la firma y
 expiración: el estado local nunca concede permisos por sí mismo.
 
 Desde el Milestone 9, Send con Track ON lo invoca a través del worker usando
-destinatario/asunto del compose. Gmail no modifica el cuerpo. Los tests unitarios
+destinatario/asunto del compose. El Milestone 10 añade el pixel al cuerpo. Los tests unitarios
 usan storage y fetch mockeados. Consulta el README raíz para el ejemplo curl,
 síntesis local, diseño CREATED y limitación de revocación de JWT de hasta 24 horas.
 
@@ -204,8 +204,7 @@ con timestamp, IP observada y User-Agent raw, y entrega un PNG transparente de 1
 Una carga no prueba lectura humana: IP y User-Agent pueden ser de proxies. Todavía
 no hay geolocalización ni parsing de navegador/dispositivo.
 
-Gmail todavía no inserta el pixel. Desde el Milestone 9 se intercepta Send
-para crear el registro, pero no se llama GET /o desde Gmail. El README raíz documenta validación por curl y la política de
+Desde el Milestone 10, Gmail inserta la URL del pixel al reanudar Send después de crear el registro. El README raíz documenta validación por curl y la política de
 resiliencia: tras confirmar EMAIL, un fallo al guardar OPEN devuelve igualmente
 200 PNG y puede perder ese evento; un fallo de lectura devuelve 500 seguro.
 
@@ -225,9 +224,8 @@ compose, accesible internamente con `GmailSendController.getTracking()`. No se
 persiste. El checkbox existente sigue siendo la única fuente de ON/OFF. No se
 lee el cuerpo completo, adjuntos, cookies o credenciales Gmail.
 
-**Todavía NO se inserta el pixel, NO se modifica el body y NO se envía trackingUrl
-por correo. Por tanto, todavía NO puede detectarse una apertura de un correo real
-enviado con esta integración.** Crear el registro tampoco demuestra que Gmail
+El Milestone 10 completa este flujo insertando el pixel antes de reanudar Send.
+Crear el registro no demuestra que Gmail
 haya completado el envío: no se introduce estado SENT.
 
 ### Interceptación y reanudación
@@ -250,7 +248,7 @@ su reanudación para no abandonar el intento que había detenido.
 
 Los mismos recipient/subject reutilizan un único intento mientras viva ese compose,
 incluso tras un fallo o si Gmail mantiene el borrador por validación, cancelación
-o Undo Send. No hay retry automático ni en un segundo click con los mismos datos.
+o Undo Send. No se repite el POST con los mismos datos; con un resultado exitoso se verifica o repara la inserción del pixel en cada nuevo intento.
 Cambiar recipient/subject inicia un intento nuevo. Para reintentar después de
 reactivar sin cambiar datos, se puede abrir un compose nuevo. El backend no tiene
 idempotencia: un timeout puede dejar un registro creado cuya respuesta no llegó.
@@ -285,7 +283,7 @@ adelante. Los logs son fijos y no contienen recipient, asunto, cuerpo, JWT ni er
 internos:
 
 ```text
-Email Tracker: tracking created
+Email Tracker: tracking pixel inserted
 Email Tracker: tracking unavailable, sending without tracking
 ```
 
@@ -320,8 +318,7 @@ o con token expirado. No debe haber reintentos automáticos. Restaurar el acceso
 al terminar. Gmail puede mostrar sus propios diálogos de asunto vacío o validación.
 
 Comprobar además: Send con asunto vacío, Ctrl/Cmd+Enter, Enter/Espacio sobre Send,
-compose ampliado, cierre durante la espera y cambios de idioma. El cuerpo recibido
-no debe contener imágenes ni URL añadidas por Email Tracker.
+compose ampliado, cierre durante la espera y cambios de idioma. Con Track ON y creación exitosa, el cuerpo recibido debe contener exactamente el pixel de tracking además del contenido original.
 
 ### Límites de la validación y del DOM
 
@@ -338,5 +335,82 @@ Se conserva el alcance de compose detectables del adapter: diálogos con subject
 y editor. Respuestas inline, envío programado, ventanas con otra estructura y
 idiomas sin señales reconocibles no están cubiertos. Si Gmail reutiliza la misma
 raíz para otro borrador puede conservar estado; una raíz nueva empieza OFF.
-No se implementan Outlook, pixel, historial en popup, geolocalización, parsing,
+No se implementan Outlook, historial en popup, geolocalización, parsing,
 notificaciones ni link tracking. No se añaden recursos AWS ni se despliega nada.
+
+## Milestone 10: insertar el pixel antes de reanudar Send
+
+Flujo: Track ON → interceptar Send → POST /api/tracking → trackingId/trackingUrl
+→ insertar y verificar pixel → click nativo de Send. Track OFF pasa sin POST ni
+pixel; también retira un pixel propio de un intento anterior. Fallos de creación,
+401 y errores de red continúan sin pixel.
+
+`GmailTrackingPixel.ts` busca `[role="textbox"][contenteditable="true"]` cuyo
+diálogo más cercano sea el compose actual. Usa `document.createElement('img')`
+y `appendChild` al final del editor, sin reconstruir innerHTML, leer/guardar el
+cuerpo ni modificar los nodos del mensaje, firma, imágenes o links. No dispara
+eventos input: debe comprobarse manualmente que Gmail serializa ese cambio.
+
+El img lleva `data-email-tracker-id="{trackingId}"`, width/height 1, alt vacío,
+aria-hidden true y estilos width/height 1px, border 0, opacity 0. No usa
+`display:none` ni position absolute/fixed. Se asigna exactamente la trackingUrl
+recibida; `validateTrackingUrl` exige una URL absoluta HTTPS, ruta `/o/` con sufijo
+y sin credenciales. Rechaza HTTP, javascript y data. No restringe el host a la API
+de activación: esta puede usar API Gateway mientras el pixel usa un dominio propio.
+
+El WeakMap existente sigue siendo la fuente del contexto. No se usa chrome.storage
+para el pixel ni se mantiene otra bandera de inserción que pueda quedar obsoleta:
+se verifica el DOM. Se reutiliza el nodo del mismo tracking, eliminando duplicados
+propios y píxeles obsoletos. Un editor reconstruido recibe el mismo tracking sin
+otro POST. Cada compose está aislado, también frente a diálogos anidados. Varios
+To siguen compartiendo un solo pixel; no hay tracking individual por destinatario.
+
+Si falta body, la URL es inválida o falla appendChild/verificación, se intenta
+retirar cualquier pixel propio y se emite únicamente:
+
+```text
+Email Tracker: tracking pixel unavailable, sending without tracking
+```
+
+Send se reanuda sin bloquear indefinidamente. Un registro CREATED puede quedar en
+backend sin pixel enviado; no hay DELETE/cancel. El contexto exitoso se conserva
+para poder reintentar la inserción con los mismos datos. Si el DOM impide incluso
+retirar nodos, la limpieza no puede garantizarse; se advierte y se prioriza reanudar.
+El éxito emite `Email Tracker: tracking pixel inserted`, sin contenido ni tokens.
+
+### Validación manual obligatoria para aprobar Milestone 10
+
+Pendiente: esta implementación se verifica con Vitest + jsdom; no constituye
+validación de Gmail real. Repetir en Chrome y Edge con correos de prueba propios.
+
+1. Compilar, cargar/recargar `apps/extension/dist` y recargar Gmail.
+2. Sin backend, probar OFF y ON: ambos deben enviar normalmente; ON da warning,
+   sin pixel. Inspeccionar con breakpoint antes del click de reanudación si hace falta.
+3. Con AWS ya desplegado y URL configurada, activar una licencia. El endpoint
+   público OPEN `GET /o/{trackingId}` ya existe; no se despliega AWS en este milestone.
+4. Crear un compose con mensaje, firma, link e imagen de firma; usar destinatario
+   propio y asunto `Tracking pixel test`. Activar Track y enviar.
+5. En Network del service worker comprobar un POST /api/tracking = 201; en Console
+   de Gmail comprobar `Email Tracker: tracking pixel inserted`.
+6. Mediante breakpoint en la reanudación, comprobar exactamente un
+   `img[data-email-tracker-id]` al final del editor del compose correcto, con la URL
+   exacta recibida, y que mensaje/firma conservan sus nodos. No hay modo debug de producto.
+7. Recibir en otro cliente e inspeccionar HTML/original para confirmar
+   `https://tracking.cesaragudelo.com/o/{trackingId}`. Comprobar eventos OPEN en
+   backend cuando se cargue la imagen. La prueba completa requiere AWS desplegado.
+8. Repetir con dos compose, doble click, Ctrl/Cmd+Enter y un segundo intento si
+   Gmail mantiene el borrador. Confirmar un registro y un pixel por tracking.
+9. Verificar fallback con backend inaccesible, y OFF después de un intento ON.
+   Confirmar que el correo conserva mensaje/firma y que no lleva pixel en fallback.
+
+No se cubren reply inline, scheduled send, confidential mode ni Gmail móvil.
+Gmail puede sanear atributos/estilos o no reconocer el cambio DOM; la aceptación
+manual debe confirmar el HTML enviado antes de aprobar. Proxies, caché, bloqueo
+de imágenes y Apple Mail Privacy Protection limitan la interpretación. Incluso
+la carga del pixel en el compose del remitente puede producir un OPEN: una
+**apertura detectada** no demuestra lectura humana ni identifica al destinatario.
+
+El content script de Milestone 9 medía 95 203 bytes: incorpora Zod para validar
+metadata y el puente de mensajes. Esta implementación añade solo lógica DOM,
+sin nuevas dependencias, AWS SDK ni librerías backend; no optimiza el bundle.
+El build de Milestone 10 mide 96 742 bytes (+1 539 bytes, aproximadamente 1,6 %).

@@ -1,8 +1,8 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 9 conecta Send de Gmail con creación de tracking cuando Track email
+Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 10 conecta Send de Gmail con creación de tracking e inserción del pixel cuando Track email
 está ON, sobre la consulta protegida, historial, pixel público y activación existentes. El popup obtiene una autorización firmada
-por el backend antes de mostrar `Activated`. Una carga del pixel registra una apertura detectada; Gmail todavía no modifica el correo.
+por el backend antes de mostrar `Activated`. Una carga del pixel registra una apertura detectada; Gmail añade el pixel antes de reanudar Send; la validación manual real está pendiente.
 
 ## Arquitectura implementada
 
@@ -238,12 +238,12 @@ El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
 acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
 sustituyen esa validación de deployment.
 
-## Fuera del Milestone 9
+## Fuera del Milestone 10
 
 No se implementan UI de historial, Outlook, geolocalización,
 parsing de User-Agent, dashboard ni link tracking. Gmail conserva su adapter
 y checkbox del Milestone 5: ahora intercepta Send y crea tracking mediante el worker,
-pero no modifica el body ni inserta el pixel.
+e inserta el pixel al final del body antes de reanudar Send.
 
 Referencias: [transacciones e IAM de DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html),
 [almacenamiento de extensiones Chromium](https://developer.chrome.com/docs/extensions/reference/api/storage).
@@ -431,7 +431,7 @@ User-Agent pueden corresponder a proxies; Gmail puede cachear imágenes, Apple M
 puede precargarlas y otros clientes pueden bloquearlas. Los headers anti-cache no
 garantizan que un proxy solicite el pixel en cada apertura. No hay geolocalización,
 parsing de navegador/sistema/dispositivo ni detección de proxies en este milestone.
-Gmail todavía no inserta el pixel; el Milestone 9 intercepta Send para crear tracking.
+El Milestone 10 inserta el pixel en Gmail después de crear tracking y antes de reanudar Send.
 
 ### Validación local del pixel (sin AWS)
 
@@ -557,7 +557,7 @@ Los logs contienen requestId, trackingId y resultado, nunca JWT, IP/User-Agent,
 destinatario, asunto o errores internos. No se añaden tablas ni dominios.
 
 No hay geolocalización, parsing de navegador/OS/dispositivo, detección de proxies
-o Apple MPP, Outlook, UI de historial, inserción automática de pixel,
+o Apple MPP, Outlook, UI de historial,
 link tracking ni dashboard.
 
 ### Validación del Milestone 8 sin AWS
@@ -603,10 +603,22 @@ Send con Track ON se detiene temporalmente para extraer primer To válido y asun
 llamar POST /api/tracking desde el service worker y asociar la respuesta al compose
 en memoria. Después se reanuda el botón nativo. OFF pasa sin API; errores o espera
 superior a 20 segundos reanudan sin tracking con un warning fijo. El JWT no cruza
-al content script. No se modifica cuerpo/asunto ni se inserta pixel: estos correos
-todavía no permiten detectar aperturas reales.
+al content script. El Milestone 10 añade el pixel al final del editor antes de reanudar
+Send, preservando contenido y firma; el asunto no se modifica.
 
 Ver [documentación de la extensión](apps/extension/README.md#milestone-9-crear-tracking-antes-de-send-en-gmail)
 para interceptación, reanudación, duplicados, destinatarios múltiples, limitaciones
 DOM y validación manual OFF/ON/error en Chrome. Los tests son unitarios con mocks;
 no se validó una sesión Gmail real ni se desplegó AWS. Sin infraestructura nueva.
+
+## Milestone 10: pixel en el compose de Gmail
+
+Se valida la trackingUrl recibida (HTTPS y ruta `/o/`), se añade un img 1x1 con
+`data-email-tracker-id` al final del body mediante appendChild y se verifica antes
+de reanudar Send. El contexto existente y el DOM evitan duplicados en reintentos.
+Body ausente o fallo de inserción producen warning y envío sin tracking; puede
+quedar un registro CREATED sin pixel. No hay cambios ni deployment de AWS.
+
+Consultar [inserción y validación manual obligatoria](apps/extension/README.md#milestone-10-insertar-el-pixel-antes-de-reanudar-send).
+La aceptación sigue pendiente de comprobar Gmail real en Chrome/Edge y el HTML
+recibido con AWS desplegado. Un OPEN no demuestra lectura humana.

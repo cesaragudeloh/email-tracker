@@ -6,6 +6,7 @@ import {
   requestTracking,
   type CreateTracking,
 } from '../../api/trackingMessages.js';
+import { GmailTrackingPixel } from './GmailTrackingPixel.js';
 import { GmailTrackingControls } from './GmailTrackingControls.js';
 import {
   findGmailSendButton,
@@ -29,13 +30,18 @@ const sameMetadata = (
 
 export class GmailSendController {
   private started = false;
+  private readonly pixel = new GmailTrackingPixel();
   constructor(
     private readonly document: Document,
     private readonly controls: GmailTrackingControls,
     private readonly create: CreateTracking = requestTracking,
     private readonly warn: () => void = () => console.warn(warning),
     private readonly created: () => void = () =>
-      console.info('Email Tracker: tracking created'),
+      console.info('Email Tracker: tracking pixel inserted'),
+    private readonly pixelWarning: () => void = () =>
+      console.warn(
+        'Email Tracker: tracking pixel unavailable, sending without tracking',
+      ),
   ) {}
 
   start(): void {
@@ -84,9 +90,13 @@ export class GmailSendController {
       event.stopImmediatePropagation();
       return;
     }
-    if (!this.controls.isEnabled(dialog)) return;
+    if (!this.controls.isEnabled(dialog)) {
+      if (!this.pixel.remove(dialog)) this.pixelWarning();
+      return;
+    }
     const request = readGmailMetadata(dialog);
     if (!request || !event.cancelable) {
+      if (!this.pixel.remove(dialog)) this.pixelWarning();
       if (state) {
         state.tracking = undefined;
         state.attempted = undefined;
@@ -96,7 +106,11 @@ export class GmailSendController {
     }
     // Gmail may keep a compose after validation, cancellation or an Undo Send.
     // Reuse the same attempt; changed metadata starts a new attempt.
-    if (sameMetadata(state?.attempted, request)) return;
+    if (sameMetadata(state?.attempted, request)) {
+      if (state?.tracking) this.insertPixel(dialog, state.tracking);
+      return;
+    }
+    if (!this.pixel.remove(dialog)) this.pixelWarning();
     event.preventDefault();
     event.stopImmediatePropagation();
     state ??= { isCreatingTracking: false, isResumingSend: false };
@@ -130,7 +144,7 @@ export class GmailSendController {
         sameMetadata(request, readGmailMetadata(dialog))
       ) {
         state.tracking = tracking;
-        this.created();
+        this.insertPixel(dialog, tracking);
       } else if (dialog.isConnected) this.warn();
     } catch {
       this.warn();
@@ -141,6 +155,14 @@ export class GmailSendController {
       state.attempted = readGmailMetadata(dialog);
       if (dialog.isConnected) this.resume(dialog, state);
     }
+  }
+
+  private insertPixel(
+    dialog: HTMLElement,
+    tracking: CreateTrackingResponse,
+  ): void {
+    if (this.pixel.insert(dialog, tracking)) this.created();
+    else this.pixelWarning();
   }
 
   private resume(dialog: HTMLElement, state: ComposeSendState): void {

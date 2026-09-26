@@ -6,6 +6,7 @@ import {
 // La detección de compose no depende de etiquetas traducidas.
 export const gmailSelectors = {
   dialog: '[role="dialog"]',
+  trackingPixel: 'img[data-email-tracker-id]',
   subject: 'input[name="subjectbox"]',
   toInput: 'input[name="to"], textarea[name="to"]',
   toRegion: '[data-name="to"], [data-recipient-type="to"]',
