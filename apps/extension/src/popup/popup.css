@@ -105,3 +105,65 @@ button:focus-visible {
   font-size: 11px;
   overflow-wrap: anywhere;
 }
+
+[hidden] {
+  display: none !important;
+}
+#tracking-history {
+  overflow-wrap: anywhere;
+}
+#tracking-history h2 {
+  font-size: 18px;
+  margin-top: 24px;
+}
+#tracking-history h3 {
+  font-size: 16px;
+}
+#tracking-history p {
+  font-size: 13px;
+  line-height: 1.5;
+}
+#tracking-history dd {
+  color: #1e293b;
+  margin-bottom: 12px;
+}
+#tracking-history nav {
+  display: flex;
+  gap: 12px;
+}
+#tracking-history [role='alert'] {
+  color: #991b1b;
+}
+.tracking-list,
+.tracking-events {
+  list-style: none;
+  padding: 0;
+}
+.tracking-list button {
+  text-align: left;
+  color: #1e293b;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+}
+.tracking-list button:hover {
+  background: #eff6ff;
+}
+.tracking-list span,
+.tracking-list small {
+  display: block;
+  margin-top: 6px;
+}
+.tracking-list small {
+  color: #475569;
+}
+.tracking-events li {
+  padding: 12px 0;
+  border-bottom: 1px solid #cbd5e1;
+}
+.tracking-events time,
+.tracking-events summary {
+  font-size: 13px;
+}
+.tracking-events summary {
+  cursor: pointer;
+}

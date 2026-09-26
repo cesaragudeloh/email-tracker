@@ -2,7 +2,8 @@
 
 Una base Manifest V3 para Chrome y Edge, con TypeScript, Vite, HTML y CSS.
 El popup muestra el estado local de autorización, solicita el código si no existe
-un JWT vigente y guarda la respuesta de `POST /api/activate` en `chrome.storage.local`.
+un JWT vigente. Desde el Milestone 11, el service worker realiza la activación y guarda
+la autorización en `chrome.storage.local`; el popup solo recibe el estado público.
 No almacena el código ni muestra el JWT. Incluye un cliente de creación de tracking
 conectado al intento de Send en Gmail cuando Track email está ON, con inserción del pixel antes del envío (Milestone 10).
 
@@ -58,7 +59,7 @@ El proyecto no incluye servidor local de activación en este milestone.
 6. Con backend desplegado y una licencia insertada, introduce su código y pulsa
    **Activate**. Debe mostrar **Status: Activated**, sin exponer el token.
 7. Cierra y abre de nuevo para comprobar persistencia. La expiración se revisa
-   al abrir, recuperar foco y periódicamente mientras el popup está abierto.
+   al abrir, recuperar foco y al consultar desde el worker. No hay polling periódico.
 8. Después de cada build, recarga la extensión y las pestañas de correo.
 
 El estado del popup es informativo; el backend debe validar los JWT para autorizar
@@ -182,7 +183,7 @@ desde `edge://extensions`. La validación real en ambos navegadores es manual.
 ## Milestone 6: cliente de tracking
 
 `src/api/trackingClient.ts` expone `createTrackingClient().createTracking({ recipient,
-subject })` para popup o service worker. Reutiliza `config.apiBaseUrl` (configurada
+subject })` desde el service worker. Reutiliza `config.apiBaseUrl` (configurada
 con `VITE_ACTIVATION_API_URL`) y el storage de activación; obtiene el JWT y envía
 `Authorization: Bearer` a `POST /api/tracking`. Sin autorización local vigente no
 hace fetch. Los contratos request/response se validan con el paquete shared.
@@ -221,7 +222,8 @@ No hay mensajes desde la página con postMessage ni scripts inyectados en MAIN.
 
 El resultado `{ trackingId, trackingUrl, createdAt }` queda en un WeakMap por
 compose, accesible internamente con `GmailSendController.getTracking()`. No se
-persiste. El checkbox existente sigue siendo la única fuente de ON/OFF. No se
+persiste como contexto de compose; desde Milestone 11 se guarda aparte metadata mínima
+para el listado local. El checkbox existente sigue siendo la única fuente de ON/OFF. No se
 lee el cuerpo completo, adjuntos, cookies o credenciales Gmail.
 
 El Milestone 10 completa este flujo insertando el pixel antes de reanudar Send.
@@ -335,7 +337,7 @@ Se conserva el alcance de compose detectables del adapter: diálogos con subject
 y editor. Respuestas inline, envío programado, ventanas con otra estructura y
 idiomas sin señales reconocibles no están cubiertos. Si Gmail reutiliza la misma
 raíz para otro borrador puede conservar estado; una raíz nueva empieza OFF.
-No se implementan Outlook, historial en popup, geolocalización, parsing,
+No se implementan Outlook, geolocalización, parsing,
 notificaciones ni link tracking. No se añaden recursos AWS ni se despliega nada.
 
 ## Milestone 10: insertar el pixel antes de reanudar Send
@@ -414,3 +416,92 @@ El content script de Milestone 9 medía 95 203 bytes: incorpora Zod para validar
 metadata y el puente de mensajes. Esta implementación añade solo lógica DOM,
 sin nuevas dependencias, AWS SDK ni librerías backend; no optimiza el bundle.
 El build de Milestone 10 mide 96 742 bytes (+1 539 bytes, aproximadamente 1,6 %).
+
+## Milestone 11: listado y detalle en el popup
+
+Después de `createTracking()` exitoso, el worker intenta guardar un
+`LocalTrackingRecord` con **solo trackingId, recipient, subject y createdAt** en
+`chrome.storage.local`, bajo `trackingHistory`, asociado al installationId actual.
+No guarda trackingUrl, cuerpo, adjuntos, JWT, IP, User-Agent ni eventos OPEN en ese
+historial. La autorización mantiene su almacenamiento independiente y únicamente
+el worker la lee para la activación y llamadas API; no se transmite al popup ni
+al content script.
+
+`historyStorage.ts` valida entradas con Zod, ignora las inválidas, deduplica por
+trackingId, ordena por createdAt descendente y conserva los **100 más recientes**.
+Web Locks serializa escrituras concurrentes para no perder registros de dos
+compose. Datos de una instalación diferente no se muestran. Storage vacío o
+corrupto produce un listado vacío o las entradas válidas restantes; un error de
+acceso se comunica a la UI como error recuperable.
+
+Orden: creación backend → intento de guardado local → respuesta a Gmail → pixel
+→ Send. Track OFF y creación fallida no escriben historial. `trackingRecorder.ts`
+limita el intento de storage a 1,5 segundos; si falla o se demora, emite el warning
+fijo `Email Tracker: local history unavailable` y devuelve el tracking para que
+pixel y Send continúen. Una escritura ya iniciada puede completarse después del
+límite; no se reintenta automáticamente. Puede haber tracking válido que no
+aparezca en el listado, o un registro local CREATED cuyo correo no se envió o
+cuyo pixel no pudo insertarse. El listado representa **creaciones**, no prueba de envío.
+
+El popup sin activar conserva el formulario y oculta el historial. Con Activated,
+muestra **Recent tracked emails**, asunto (`(No subject)` si está vacío),
+destinatario y fecha local. Seleccionar llama manualmente a `getTracking` y abre
+el detalle con status, openCount, primera/última apertura e historial newest first.
+Los estados se presentan como `Not opened yet` (CREATED) y `Open detected`
+(OPEN_DETECTED); se pluraliza `0 opens`, `1 open`, `N opens`. Fechas con
+`Intl.DateTimeFormat`, en idioma y zona horaria del navegador. Sin fecha se muestra
+`—`; sin eventos, `No opens detected yet.`
+
+Cada evento muestra fecha e IP, o `IP unavailable`. El User-Agent raw aparece en
+un bloque expandible, sin parsing. Los datos se insertan como texto, nunca HTML.
+**DynamoDB es la fuente de verdad** para status, conteo, primera/última apertura y
+eventos. El detalle solo vive en memoria mientras el popup está abierto y no se
+cachea en storage. Una detección no demuestra lectura humana.
+
+Mensajería: popup → `chrome.runtime.sendMessage` → worker → `trackingClient.getTracking`
+→ API. `trackingMessages.ts` valida request y response y solo permite mensajes de
+consulta/listado desde el popup de esta extensión. El listado lee metadata local,
+sin nuevo endpoint backend. El worker comprueba autorización local; el backend
+sigue verificando firma y ownership para cada detalle. `activationMessages.ts`
+traslada también estado/activación al worker para que el popup no reciba el JWT.
+
+**Refresh** consulta nuevamente el detalle; **Back** vuelve al listado. No hay
+polling, refresh periódico, notificaciones ni reactivación automática. Recuperar
+foco solo consulta el estado de autorización local, no refresca detalles ni llama
+al backend. Respuestas tardías se ignoran al cambiar de vista o desactivar.
+
+Errores: 404 muestra `Tracking record not found` sin borrar metadata; 401 muestra
+`Authorization expired`; red/canal/storage muestran `Unable to load tracking
+information`. El detalle conserva Back/Refresh; el listado ofrece Retry. Las
+llamadas de mensajería del popup tienen un límite de 20 segundos para salir de
+Loading si el worker no responde. La expiración se comprueba al consultar; el
+indicador Activated no garantiza que la siguiente API vaya a autorizar.
+
+### Validación manual de Milestone 11
+
+Sin AWS: cargar/recargar extensión en Chrome/Edge, comprobar la activación y que
+no aparece historial protegido sin autorización. Con autorización local todavía
+vigente y metadata previa, se puede ver el listado; si el backend no está
+disponible, abrir un registro debe dar un error seguro, con Refresh y Back. Los
+tests unitarios cubren el flujo completo offline sin bypass de licencia.
+
+Con AWS **ya desplegado**:
+
+1. Activar extensión y enviar un correo de prueba propio desde Gmail con Track ON.
+2. Abrir popup; comprobar el asunto, destinatario y fecha en Recent tracked emails.
+3. Seleccionar el registro: debe aparecer Loading y luego el detalle. Sin cargas
+   del pixel, debe decir Not opened yet, 0 opens y No opens detected yet.
+4. Abrir el correo destinatario con imágenes habilitadas. Pulsar Refresh y comprobar
+   Open detected, conteo, fechas y eventos. Repetir apertura y Refresh; el conteo
+   puede no aumentar por caché/proxies, y una precarga puede haber creado OPEN antes.
+5. Comprobar Back, asunto vacío, dos envíos simultáneos, Track OFF y fallo de creación.
+6. Revisar Network del worker: GET solo al seleccionar o pulsar Refresh. Dejar el
+   popup abierto no debe generar consultas periódicas. No capturar Authorization.
+7. Simular red no disponible: error recuperable; restaurar y Refresh. Probar 401/404
+   cuando se disponga de casos controlados; no debe borrar metadata ni reactivar solo.
+
+No se desplegó AWS ni se validó una sesión Gmail real como parte de esta implementación.
+Los registros anteriores a este milestone no se recuperan del backend; el historial
+local no se sincroniza entre dispositivos y se pierde al borrar storage/desinstalar.
+No hay paginación visual ni más de 100 registros locales, búsqueda, filtros,
+geolocalización, parsing de navegador/OS/dispositivo, detección de proxies u Outlook.

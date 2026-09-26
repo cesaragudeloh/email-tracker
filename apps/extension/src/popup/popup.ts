@@ -1,8 +1,6 @@
 import './popup.css';
-import { config } from '../config.js';
-import { createApiClient } from '../api/client.js';
-import { createActivationStorage } from '../activation/storage.js';
-import { createActivationService } from '../activation/activationService.js';
+import { activationBridge } from '../api/activationMessages.js';
+import { TrackingView } from './trackingView.js';
 import { activationErrorMessage } from './messages.js';
 
 function element<T extends HTMLElement>(selector: string): T {
@@ -17,9 +15,9 @@ const code = element<HTMLInputElement>('#activation-code');
 const button = element<HTMLButtonElement>('#activate-button');
 const message = element<HTMLElement>('#activation-message');
 const installation = element<HTMLElement>('#installation-id');
-const service = createActivationService(
-  createActivationStorage(),
-  createApiClient(config.apiBaseUrl),
+const service = activationBridge;
+const trackingView = new TrackingView(
+  element<HTMLElement>('#tracking-history'),
 );
 
 function render(state: { installationId: string; activated: boolean }) {
@@ -27,14 +25,25 @@ function render(state: { installationId: string; activated: boolean }) {
   status.dataset.activated = String(state.activated);
   installation.textContent = state.installationId;
   form.hidden = state.activated;
+  trackingView.setActivated(state.activated);
 }
 
 let submitting = false;
+let stateRequest = 0;
 
 async function refresh() {
+  const request = ++stateRequest;
   try {
-    render(await service.getState());
+    const state = await service.getState();
+    if (request !== stateRequest) return;
+    message.textContent = '';
+    render(state);
   } catch (error) {
+    if (request !== stateRequest) return;
+    trackingView.setActivated(false);
+    status.textContent = 'Not activated';
+    status.dataset.activated = 'false';
+    form.hidden = false;
     message.textContent = activationErrorMessage(error);
   } finally {
     button.disabled = submitting;
@@ -50,6 +59,7 @@ form.addEventListener('submit', async (event) => {
     return;
   }
   submitting = true;
+  stateRequest++;
   button.disabled = true;
   button.textContent = 'Activating…';
   message.textContent = '';
@@ -66,11 +76,8 @@ form.addEventListener('submit', async (event) => {
   }
 });
 
-// Reevalúa expiración si el popup permanece abierto; no consulta ningún endpoint futuro.
+// Recheck local authorization on focus. No periodic tracking or state polling.
 window.addEventListener('focus', () => {
-  void refresh();
-});
-window.setInterval(() => {
   if (!submitting) void refresh();
-}, 30000);
+});
 void refresh();

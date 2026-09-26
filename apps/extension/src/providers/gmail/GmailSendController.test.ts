@@ -1,5 +1,6 @@
 import '../__tests__/dom.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createTrackingRecorder } from '../../tracking/trackingRecorder.js';
 import { GmailSendController } from './GmailSendController.js';
 import { GmailTrackingControls } from './GmailTrackingControls.js';
 import { GmailAdapter } from './GmailAdapter.js';
@@ -647,3 +648,36 @@ it('removes stale pixels before a changed-metadata request fails', async () => {
   await flush();
   expect(compose.querySelector('[data-email-tracker-id]')).toBeNull();
 });
+
+it.each(['success', 'storage failure', 'create failure', 'OFF'])(
+  'history recording preserves Gmail flow: %s',
+  async (scenario) => {
+    const { compose, toggle, send, create, native } = setup();
+    const backend = vi.fn().mockResolvedValue(result);
+    const add = vi.fn().mockResolvedValue(undefined);
+    if (scenario === 'storage failure')
+      add.mockRejectedValue(new Error('quota'));
+    if (scenario === 'create failure')
+      backend.mockRejectedValue(new Error('network'));
+    create.mockImplementation(createTrackingRecorder(backend, add, vi.fn()));
+    native.mockImplementation(() => {
+      const success = scenario === 'success' || scenario === 'storage failure';
+      expect(compose.querySelectorAll('[data-email-tracker-id]')).toHaveLength(
+        success ? 1 : 0,
+      );
+      if (success)
+        expect(add).toHaveBeenCalledExactlyOnceWith({
+          trackingId: result.trackingId,
+          createdAt: result.createdAt,
+          recipient: 'first@example.com',
+          subject: 'Current subject',
+        });
+    });
+    if (scenario !== 'OFF') toggle.click();
+    send.click();
+    for (let i = 0; i < 3; i++) await flush();
+    expect(native).toHaveBeenCalledOnce();
+    if (scenario === 'OFF' || scenario === 'create failure')
+      expect(add).not.toHaveBeenCalled();
+  },
+);

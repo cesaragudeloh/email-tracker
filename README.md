@@ -1,8 +1,8 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 10 conecta Send de Gmail con creación de tracking e inserción del pixel cuando Track email
-está ON, sobre la consulta protegida, historial, pixel público y activación existentes. El popup obtiene una autorización firmada
-por el backend antes de mostrar `Activated`. Una carga del pixel registra una apertura detectada; Gmail añade el pixel antes de reanudar Send; la validación manual real está pendiente.
+Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 11 añade listado local y detalle de aperturas en el popup al flujo de Gmail con tracking cuando Track email
+está ON, sobre la consulta protegida, historial, pixel público y activación existentes. El service worker obtiene y almacena la autorización firmada
+por el backend; el popup recibe solo el estado `Activated`. Una carga del pixel registra una apertura detectada; Gmail añade el pixel antes de reanudar Send; la validación manual real está pendiente.
 
 ## Arquitectura implementada
 
@@ -238,9 +238,9 @@ El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
 acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
 sustituyen esa validación de deployment.
 
-## Fuera del Milestone 10
+## Fuera del Milestone 11
 
-No se implementan UI de historial, Outlook, geolocalización,
+No se implementan Outlook, geolocalización,
 parsing de User-Agent, dashboard ni link tracking. Gmail conserva su adapter
 y checkbox del Milestone 5: ahora intercepta Send y crea tracking mediante el worker,
 e inserta el pixel al final del body antes de reanudar Send.
@@ -309,7 +309,7 @@ Configuración adicional:
   es la base pública de API Gateway, sin `/api/activate` ni `/api/tracking`.
 
 `createTrackingClient().createTracking({ recipient, subject })` lee la autorización
-almacenada desde un contexto confiable (popup o service worker), envía Bearer y
+almacenada desde el service worker, envía Bearer y
 valida la respuesta compartida. Sin autorización local vigente no hace fetch.
 Mapea 401 a una indicación de reactivación y los errores de red a indisponibilidad.
 Desde el Milestone 9 Gmail la invoca mediante el worker al intentar Send con Track ON.
@@ -547,8 +547,8 @@ Los contratos Zod y tipos compartidos incluyen `TrackingStatus`,
 `createTrackingClient().getTracking(trackingId)` obtiene el token desde storage,
 usa la configuración API existente, envía Bearer y valida la respuesta. No hace
 fetch sin autorización local vigente. Mapea 401 a reactivación, 404 a tracking no
-encontrado y errores de red a indisponibilidad. **El popup todavía no consume
-este endpoint automáticamente**: no hay polling ni llamadas automáticas.
+encontrado y errores de red a indisponibilidad. Desde Milestone 11 el popup lo consume
+al seleccionar un tracking o pulsar Refresh, mediante mensajes al worker; no hay polling.
 
 CDK añade una Lambda, grupo de logs, rol e integración dedicados. El rol solo
 permite GetItem/Query sobre EmailTracking, GetSecretValue sobre el secreto JWT
@@ -557,7 +557,7 @@ Los logs contienen requestId, trackingId y resultado, nunca JWT, IP/User-Agent,
 destinatario, asunto o errores internos. No se añaden tablas ni dominios.
 
 No hay geolocalización, parsing de navegador/OS/dispositivo, detección de proxies
-o Apple MPP, Outlook, UI de historial,
+o Apple MPP, Outlook,
 link tracking ni dashboard.
 
 ### Validación del Milestone 8 sin AWS
@@ -622,3 +622,22 @@ quedar un registro CREATED sin pixel. No hay cambios ni deployment de AWS.
 Consultar [inserción y validación manual obligatoria](apps/extension/README.md#milestone-10-insertar-el-pixel-antes-de-reanudar-send).
 La aceptación sigue pendiente de comprobar Gmail real en Chrome/Edge y el HTML
 recibido con AWS desplegado. Un OPEN no demuestra lectura humana.
+
+## Milestone 11: historial básico en el popup
+
+El worker guarda metadata mínima de cada tracking creado con éxito en
+chrome.storage.local: trackingId, recipient, subject y createdAt. Mantiene los
+100 más recientes, sin duplicados, asociados a la instalación. Un fallo de
+persistencia local no bloquea el pixel ni Send. No se guardan eventos OPEN,
+IP, User-Agent, cuerpo o JWT en los registros de historial.
+
+Con Activated, el popup muestra listado, selección y detalle. Las consultas usan
+popup → mensajes → worker → GET existente, con Back y Refresh manual. DynamoDB
+sigue siendo fuente de verdad de aperturas. CREATED se muestra como Not opened
+yet; OPEN_DETECTED como Open detected. Hay estados de loading, 401, 404 y error
+de red, sin polling ni reactivación automática. El worker también gestiona
+activación para mantener el JWT fuera del popup/content script.
+
+Ver [documentación y validación manual](apps/extension/README.md#milestone-11-listado-y-detalle-en-el-popup).
+Sin endpoints nuevos, cambios de infraestructura ni despliegue AWS. Las pruebas
+unitarias son offline; Gmail/Chrome/Edge con AWS requieren validación manual.
