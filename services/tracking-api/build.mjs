@@ -1,3 +1,5 @@
+import process from 'node:process';
+import { packageGeoDatabase } from './dist/packageGeoDatabase.js';
 import { build } from 'esbuild';
 
 await build({
@@ -15,3 +17,5 @@ await build({
   format: 'cjs',
   sourcemap: false,
 });
+
+await packageGeoDatabase(process.env.GEOLITE2_CITY_DB_PATH, 'build/lambda');

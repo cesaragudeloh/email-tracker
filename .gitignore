@@ -37,3 +37,6 @@ $RECYCLE.BIN/
 *~
 *.tmp
 *.bak
+
+# Local MaxMind databases (download separately)
+*.mmdb

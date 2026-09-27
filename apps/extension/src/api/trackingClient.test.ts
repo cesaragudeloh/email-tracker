@@ -125,7 +125,19 @@ it('getTracking reads storage and sends Bearer with the UUID URL and parses hist
   const { client, storage, fetcher } = setup();
   expect(fetcher).not.toHaveBeenCalled();
   fetcher.mockResolvedValue(Response.json(history));
-  expect(await client.getTracking(response.trackingId)).toEqual(history);
+  expect(await client.getTracking(response.trackingId)).toEqual({
+    ...history,
+    events: history.events.map((event) => ({
+      ...event,
+      country: null,
+      region: null,
+      city: null,
+      browser: 'Unknown',
+      browserVersion: null,
+      os: 'Unknown',
+      deviceType: 'Unknown',
+    })),
+  });
   expect(storage.readAuthorization).toHaveBeenCalledWith(installationId);
   expect(fetcher).toHaveBeenCalledExactlyOnceWith(
     `https://api.example.test/api/tracking/${response.trackingId}`,

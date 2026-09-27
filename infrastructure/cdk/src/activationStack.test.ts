@@ -99,7 +99,12 @@ it('creates a public pixel route with a dedicated Lambda and no secret environme
   )!;
   result.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'openTrackingPixel.handler',
-    Environment: { Variables: { TRACKING_TABLE_NAME: { Ref: tableId } } },
+    Environment: {
+      Variables: {
+        TRACKING_TABLE_NAME: { Ref: tableId },
+        GEOLITE2_CITY_DB_PATH: '/var/task/GeoLite2-City.mmdb',
+      },
+    },
   });
 });
 it('grants pixel only GetItem/PutItem on EmailTracking and log writes', () => {

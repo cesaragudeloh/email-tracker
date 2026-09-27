@@ -1,3 +1,6 @@
+import { openEnrichmentSchema } from '@email-tracker/shared';
+import type { GeoService } from './geoService.js';
+import { UserAgentService } from './userAgentService.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -18,7 +21,26 @@ export class OpenTrackingService {
       'getTracking' | 'createOpenEvent'
     >,
     private readonly log: (entry: OpenLogEntry) => void = logOpen,
+    private readonly geo: GeoService = { locate: async () => null },
+    private readonly userAgent: Pick<
+      UserAgentService,
+      'parse'
+    > = new UserAgentService(),
   ) {}
+
+  private async locate(ip: string) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.geo.locate(ip),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('GEO_TIMEOUT')), 1000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async open(
     trackingId: unknown,
@@ -41,6 +63,31 @@ export class OpenTrackingService {
       ip: metadata.ip,
       userAgent: metadata.userAgent,
     };
+    const enrichment = openEnrichmentSchema.parse({});
+    try {
+      const geo = metadata.ip ? await this.locate(metadata.ip) : null;
+      Object.assign(enrichment, geo);
+    } catch {
+      this.log({
+        requestId,
+        trackingId: id,
+        level: 'warning',
+        geoEnrichmentSuccess: false,
+        errorCategory: 'GEO_ENRICHMENT_FAILED',
+      });
+    }
+    try {
+      Object.assign(enrichment, this.userAgent.parse(metadata.userAgent ?? ''));
+    } catch {
+      this.log({
+        requestId,
+        trackingId: id,
+        level: 'warning',
+        userAgentParsingSuccess: false,
+        errorCategory: 'UA_PARSING_FAILED',
+      });
+    }
+    Object.assign(event, enrichment);
     let persistenceSuccess = true;
     try {
       await this.repository.createOpenEvent(event);

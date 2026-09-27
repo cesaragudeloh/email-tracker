@@ -1,6 +1,6 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 11 añade listado local y detalle de aperturas en el popup al flujo de Gmail con tracking cuando Track email
+Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 12 añade geolocalización aproximada y parsing de User-Agent al detalle de aperturas en el popup al flujo de Gmail con tracking cuando Track email
 está ON, sobre la consulta protegida, historial, pixel público y activación existentes. El service worker obtiene y almacena la autorización firmada
 por el backend; el popup recibe solo el estado `Activated`. Una carga del pixel registra una apertura detectada; Gmail añade el pixel antes de reanudar Send; la validación manual real está pendiente.
 
@@ -238,10 +238,9 @@ El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
 acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
 sustituyen esa validación de deployment.
 
-## Fuera del Milestone 11
+## Fuera del Milestone 12
 
-No se implementan Outlook, geolocalización,
-parsing de User-Agent, dashboard ni link tracking. Gmail conserva su adapter
+No se implementan Outlook, detección avanzada de proxies, dashboard ni link tracking. Gmail conserva su adapter
 y checkbox del Milestone 5: ahora intercepta Send y crea tracking mediante el worker,
 e inserta el pixel al final del body antes de reanudar Send.
 
@@ -429,8 +428,7 @@ tablas, dominio personalizado, Route53, ACM, CloudFront o servicios externos.
 Una carga significa **Apertura detectada**, no prueba de lectura humana. IP y
 User-Agent pueden corresponder a proxies; Gmail puede cachear imágenes, Apple Mail
 puede precargarlas y otros clientes pueden bloquearlas. Los headers anti-cache no
-garantizan que un proxy solicite el pixel en cada apertura. No hay geolocalización,
-parsing de navegador/sistema/dispositivo ni detección de proxies en este milestone.
+garantizan que un proxy solicite el pixel en cada apertura. El Milestone 12 añade geolocalización y parsing de navegador/sistema/dispositivo; no añade detección de proxies.
 El Milestone 10 inserta el pixel en Gmail después de crear tracking y antes de reanudar Send.
 
 ### Validación local del pixel (sin AWS)
@@ -556,7 +554,7 @@ y escritura en sus logs; no permite Scan, escrituras DynamoDB ni acceso a licenc
 Los logs contienen requestId, trackingId y resultado, nunca JWT, IP/User-Agent,
 destinatario, asunto o errores internos. No se añaden tablas ni dominios.
 
-No hay geolocalización, parsing de navegador/OS/dispositivo, detección de proxies
+El Milestone 12 añade geolocalización y parsing de navegador/OS/dispositivo. No hay detección de proxies
 o Apple MPP, Outlook,
 link tracking ni dashboard.
 
@@ -641,3 +639,117 @@ activación para mantener el JWT fuera del popup/content script.
 Ver [documentación y validación manual](apps/extension/README.md#milestone-11-listado-y-detalle-en-el-popup).
 Sin endpoints nuevos, cambios de infraestructura ni despliegue AWS. Las pruebas
 unitarias son offline; Gmail/Chrome/Edge con AWS requieren validación manual.
+
+## Milestone 12: enriquecimiento de aperturas
+
+Cada OPEN conserva `eventId`, `trackingId`, `eventType`, `openedAt`, `ip` y
+`userAgent` raw y añade `country`, `region`, `city`, `browser`,
+`browserVersion`, `os` y `deviceType`. La clave sigue siendo
+`TRACKING#{trackingId}` / `OPEN#{openedAt}#{eventId}`; EMAIL no cambia.
+GET devuelve los nuevos campos para cada evento. Los históricos sin esos campos
+se normalizan a `null` para geo/versión y `Unknown` para navegador/OS/dispositivo;
+se aceptan también valores null explícitos. Device type solo admite Desktop,
+Mobile, Tablet y Unknown.
+
+El popup muestra ciudad, región y país disponibles bajo “Approximate location”,
+o “Location unavailable”, y navegador · OS · dispositivo, o “Unknown device”.
+IP sigue siendo un detalle independiente. No hay coordenadas, GPS, domicilio,
+mapas ni ubicación exacta. La IP y el User-Agent pueden pertenecer a un proxy;
+ubicación, navegador y dispositivo pueden ser aproximados o incorrectos.
+Un evento sigue significando **Open detected**, nunca prueba de lectura humana.
+No se añade detección específica de proxies ni de Apple Mail Privacy Protection.
+
+### GeoLite2 local en Lambda
+
+Se utiliza [maxmind](https://github.com/runk/node-maxmind) para leer el formato
+binario GeoLite2-City MMDB, sin servicios HTTP. Para este MVP se empaqueta la DB
+con el código Lambda: no requiere S3 en runtime, Layer, secretos adicionales ni
+permisos IAM nuevos. El pipeline actual comparte un asset entre las cuatro
+Lambdas; la DB aumenta ese asset, pero solo la Lambda del pixel la carga.
+El lector se inicializa de forma diferida y se comparte entre solicitudes del
+mismo runtime (incluidas solicitudes concurrentes). No se relee por evento. La espera asíncrona de geo tiene un límite de un segundo para preservar tiempo para guardar OPEN y responder el pixel; un resultado tardío no modifica el evento.
+Las IPs inválidas, privadas, loopback, link-local y multicast se omiten, también
+IPv4 privadas representadas como IPv6 mapped. Las IP públicas IPv4/IPv6 se
+consultan y los resultados parciales son válidos. Se prefieren nombres en español,
+con fallback a inglés.
+
+1. Crear una cuenta en [MaxMind GeoLite](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
+   y descargar **GeoLite2 City, formato MMDB** desde el portal autenticado.
+2. Extraer `GeoLite2-City.mmdb` fuera del repositorio. Si se usa una license key
+   para descargar, mantenerla en la configuración privada de la herramienta de
+   descarga; nunca en Git, código, extensión ni variables del stack.
+3. Compilar desde la raíz con una ruta absoluta (sin credenciales):
+
+   ```bash
+   GEOLITE2_CITY_DB_PATH=/ruta/privada/GeoLite2-City.mmdb npm run build
+   npm run synth --workspace=@email-tracker/cdk -- --no-lookups
+   ```
+
+   El build copia la DB a `services/tracking-api/build/lambda/GeoLite2-City.mmdb`.
+   CDK empaqueta ese directorio y configura el pixel con
+   `GEOLITE2_CITY_DB_PATH=/var/task/GeoLite2-City.mmdb`. No despliega.
+   Una ruta fuente configurada pero ilegible hace fallar el build.
+
+4. Para actualizar, descargar una DB nueva, sustituir el archivo externo,
+   repetir build/synth y desplegar solo con autorización. No hay actualización
+   automática. Mantener actualizada la DB según las condiciones de MaxMind
+   (su documentación exige retirar bases antiguas dentro de los 30 días de una
+   nueva publicación). No publicar el asset con la base como descarga pública.
+
+Este producto utiliza datos GeoLite2 creados por MaxMind, disponibles en
+[MaxMind](https://www.maxmind.com). Los archivos `*.mmdb` se excluyen de Git.
+Sin la variable de build, la compilación funciona sin DB y elimina una copia
+anterior del asset para evitar reutilizarla accidentalmente. En ese modo se
+obtienen aperturas con UA pero sin geo; **es necesario aportar la DB para obtener
+geolocalización real**. Los tests usan mocks, no descargan bases ni credenciales.
+El tamaño, memoria y tiempo de carga con la DB real deben comprobarse antes del
+despliegue; la validación local sin base no mide ese coste.
+
+### User-Agent y resiliencia
+
+Se utiliza [ua-parser-js v1](https://docs.uaparser.dev/v1/) (MIT), solo en backend:
+evita mantener expresiones regulares propias para navegador, versión, OS y
+móviles/tablets. Desktop se asigna cuando no hay otro tipo y el parser reconoce
+un OS de escritorio; entradas vacías/desconocidas dan Unknown. El User-Agent raw
+permanece intacto. Un fallo del parser no borra la geolocalización y viceversa.
+
+Tras validar que existe EMAIL, se obtiene timestamp y metadata, se intenta cada
+enriquecimiento y se persiste OPEN. Una excepción de lectura/lookup GeoLite2 o
+parsing genera un warning JSON con categoría fija e identificadores, sin IP,
+User-Agent ni mensaje privado del proveedor. El OPEN conserva los datos parciales
+y el handler devuelve 200 PNG. Una carga fallida de DB se recuerda en ese runtime
+para evitar lecturas repetidas; un nuevo runtime/despliegue permite reintentar.
+Si falla PutItem también se mantiene 200 PNG para tracking existente, aunque se
+pierde ese evento, como en Milestone 7. IDs inválidos/inexistentes conservan su
+política previa. No se modifican autorización, tablas ni permisos IAM.
+
+### Validación del Milestone 12
+
+```bash
+npm run build
+npm run lint
+npm test
+npm run format:check
+npm run synth --workspace=@email-tracker/cdk -- --no-lookups
+```
+
+Solo tests unitarios Vitest: validación IPv4/IPv6, exclusión de IPs locales,
+lookup completo/parcial/ausente, caché y fallos; parsing de navegadores y tipos
+de dispositivo; persistencia con fallos independientes o simultáneos; contratos
+históricos/enriquecidos, popup y empaquetado. No hay E2E ni polling.
+
+Validación manual opcional con AWS (no ejecutada automáticamente):
+
+1. Aportar la DB, compilar, revisar synth y desplegar el stack autorizado.
+2. Recargar la extensión compilada en Chrome o Edge, activar y enviar desde
+   Gmail un correo con Track email habilitado.
+3. Abrir el correo con imágenes habilitadas; consultar el detalle desde el popup
+   y pulsar Refresh. Comprobar ubicación aproximada y navegador/OS/dispositivo.
+4. Consultar GET autenticado y comprobar los siete campos nuevos por evento;
+   revisar OPEN en DynamoDB y verificar que `userAgent` raw sigue presente.
+5. Comparar un evento histórico: debe responder sin errores y mostrar los
+   fallbacks. En una prueba sin DB, verificar OPEN y PNG aunque geo sea null;
+   revisar el warning estructurado sin metadata sensible.
+
+Gmail puede devolver metadata de su proxy o cachear la imagen: no exigir que la
+ciudad/dispositivo coincidan con los del destinatario ni un evento por lectura.

@@ -10,6 +10,7 @@ import type { TrackingOpenEvent } from './openTracking.js';
 import { z } from 'zod';
 import {
   createTrackingRequestSchema,
+  openEnrichmentSchema,
   trackingStatusSchema,
   trackingOpenEventResponseSchema,
   type TrackingOpenEventResponse,
@@ -93,6 +94,7 @@ export class DynamoTrackingRepository implements TrackingRepository {
           openedAt: event.openedAt,
           ip: event.ip,
           userAgent: event.userAgent,
+          ...openEnrichmentSchema.parse(event),
         },
         ConditionExpression: 'attribute_not_exists(PK)',
       }),

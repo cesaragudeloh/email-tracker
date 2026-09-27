@@ -222,7 +222,9 @@ it('renders external metadata and raw User-Agent as text, never HTML', async () 
   api.get.mockResolvedValue({
     ...detail,
     subject: payload,
-    events: [{ ...events[0], userAgent: payload }],
+    events: [
+      { ...events[0], userAgent: payload, city: payload, browser: payload },
+    ],
   });
   view.setActivated(true);
   await flush();
@@ -232,3 +234,41 @@ it('renders external metadata and raw User-Agent as text, never HTML', async () 
   expect(root.querySelector('img')).toBeNull();
   expect(root.textContent).toContain(payload);
 });
+
+it.each([
+  [
+    {
+      city: 'Medellín',
+      region: 'Antioquia',
+      country: 'Colombia',
+      browser: 'Chrome',
+      os: 'Windows',
+      deviceType: 'Desktop',
+    },
+    'Medellín, Antioquia, Colombia',
+    'Chrome · Windows · Desktop',
+  ],
+  [{ country: 'Colombia' }, 'Colombia', 'Unknown device'],
+  [
+    { country: null, browser: null, os: null, deviceType: null },
+    'Location unavailable',
+    'Unknown device',
+  ],
+  [{}, 'Location unavailable', 'Unknown device'],
+])(
+  'renders approximate event metadata %j',
+  async (enrichment, location, device) => {
+    const { api, view } = setup();
+    api.get.mockResolvedValue({
+      ...detail,
+      events: [{ ...events[0], ...enrichment }],
+    });
+    view.setActivated(true);
+    await flush();
+    button('(No subject)').click();
+    await flush();
+    expect(root.textContent).toContain(`Approximate location: ${location}`);
+    expect(root.textContent).toContain(device);
+    expect(root.textContent).toContain('may belong to a proxy');
+  },
+);

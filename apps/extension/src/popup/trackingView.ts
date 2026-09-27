@@ -5,7 +5,13 @@ import {
   requestTrackingList,
   TrackingQueryError,
 } from '../api/trackingMessages.js';
-import { formatDate, formatOpenCount, formatSubject } from './format.js';
+import {
+  formatDate,
+  formatOpenCount,
+  formatSubject,
+  formatLocation,
+  formatDevice,
+} from './format.js';
 
 interface TrackingViewApi {
   list: () => Promise<LocalTrackingRecord[]>;
@@ -152,6 +158,8 @@ export class TrackingView {
           time.dateTime = event.openedAt;
           item.append(
             time,
+            this.node('p', `Approximate location: ${formatLocation(event)}`),
+            this.node('p', formatDevice(event)),
             this.node('p', event.ip ? `IP: ${event.ip}` : 'IP unavailable'),
           );
           if (event.userAgent) {
@@ -169,7 +177,7 @@ export class TrackingView {
       this.root.append(
         this.node(
           'p',
-          'An open detected is not proof that a person read the email. Image proxies, caching and preloading can affect results.',
+          'An open detected is not proof that a person read the email. Image proxies, caching and preloading can affect results. IP and User-Agent may belong to a proxy; location, browser and device may be inaccurate.',
         ),
       );
     } catch (error) {

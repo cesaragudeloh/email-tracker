@@ -22,8 +22,23 @@ export type CreateTrackingResponse = z.infer<
 >;
 export type TrackingStatus = z.infer<typeof trackingStatusSchema>;
 
+export const openEnrichmentSchema = z.object({
+  country: z.string().nullable().default(null),
+  region: z.string().nullable().default(null),
+  city: z.string().nullable().default(null),
+  browser: z.string().nullable().default('Unknown'),
+  browserVersion: z.string().nullable().default(null),
+  os: z.string().nullable().default('Unknown'),
+  deviceType: z
+    .enum(['Desktop', 'Mobile', 'Tablet', 'Unknown'])
+    .nullable()
+    .default('Unknown'),
+});
+export type OpenEnrichment = z.infer<typeof openEnrichmentSchema>;
+
 export const trackingOpenEventResponseSchema = z
   .object({
+    ...openEnrichmentSchema.shape,
     eventId: z.uuid(),
     openedAt: z.iso.datetime(),
     ip: z.string().nullable(),

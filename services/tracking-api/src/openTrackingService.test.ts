@@ -1,3 +1,6 @@
+import { openEnrichmentSchema } from '@email-tracker/shared';
+import { createOpenTrackingHandler } from './openTrackingHandler.js';
+import { MaxMindGeoService } from './geoService.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { OpenTrackingService } from './openTrackingService.js';
@@ -24,6 +27,7 @@ it('creates an OPEN with server UUID, UTC timestamp and raw metadata after readi
     eventType: 'OPEN',
     openedAt: expect.any(String),
     ...metadata,
+    ...openEnrichmentSchema.parse({}),
   });
   expect(repository.getTracking).toHaveBeenCalledWith(id);
   expect(repository.getTracking.mock.invocationCallOrder[0]).toBeLessThan(
@@ -101,4 +105,137 @@ it('records all five concurrent loads even in the same millisecond', async () =>
   expect(new Set(events.map((event) => event.openedAt))).toEqual(
     new Set(['2026-09-24T21:15:22.123Z']),
   );
+});
+
+const geoResult = {
+  country: 'Colombia',
+  region: 'Antioquia',
+  city: 'Medellín',
+};
+const uaResult = {
+  browser: 'Chrome',
+  browserVersion: '130',
+  os: 'Windows',
+  deviceType: 'Desktop' as const,
+};
+it.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])(
+  'persists independent enrichment with geo failure=%s and UA failure=%s',
+  async (geoFails, uaFails) => {
+    const { repository, log } = setup();
+    const geo = {
+      locate: vi.fn().mockImplementation(async () => {
+        if (geoFails) throw new Error('sensitive provider detail');
+        return geoResult;
+      }),
+    };
+    const ua = {
+      parse: vi.fn().mockImplementation(() => {
+        if (uaFails) throw new Error('sensitive UA detail');
+        return uaResult;
+      }),
+    };
+    const service = new OpenTrackingService(repository, log, geo, ua);
+    await service.open(id, metadata, 'request');
+    expect(repository.createOpenEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...metadata,
+        ...openEnrichmentSchema.parse({}),
+        ...(!geoFails ? geoResult : {}),
+        ...(!uaFails ? uaResult : {}),
+      }),
+    );
+    expect(
+      log.mock.calls.filter(([entry]) => entry.level === 'warning'),
+    ).toHaveLength(Number(geoFails) + Number(uaFails));
+    expect(JSON.stringify(log.mock.calls)).not.toContain('sensitive');
+    expect(JSON.stringify(log.mock.calls)).not.toContain(metadata.ip);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(metadata.userAgent);
+  },
+);
+it('does not enrich a missing tracking record', async () => {
+  const { repository, log } = setup();
+  repository.getTracking.mockResolvedValue(undefined);
+  const geo = { locate: vi.fn() };
+  const ua = { parse: vi.fn() };
+  await expect(
+    new OpenTrackingService(repository, log, geo, ua).open(id, metadata, 'r'),
+  ).rejects.toMatchObject({ statusCode: 404 });
+  expect(geo.locate).not.toHaveBeenCalled();
+  expect(ua.parse).not.toHaveBeenCalled();
+});
+it('a broken MaxMind provider safely falls back while OPEN persists', async () => {
+  const { repository, log } = setup();
+  const geo = new MaxMindGeoService(
+    'db',
+    vi.fn().mockRejectedValue(new Error('private path')),
+  );
+  await new OpenTrackingService(repository, log, geo).open(
+    id,
+    { ...metadata, ip: '8.8.8.8' },
+    'r',
+  );
+  expect(repository.createOpenEvent).toHaveBeenCalledWith(
+    expect.objectContaining({ country: null }),
+  );
+  expect(log).toHaveBeenCalledWith(
+    expect.objectContaining({
+      level: 'warning',
+      errorCategory: 'GEO_ENRICHMENT_FAILED',
+    }),
+  );
+});
+it('returns PNG even when both enrichments and PutItem fail', async () => {
+  const { repository, log } = setup();
+  repository.createOpenEvent.mockRejectedValue(new Error('write'));
+  const service = new OpenTrackingService(
+    repository,
+    log,
+    {
+      locate: async () => {
+        throw new Error('geo');
+      },
+    },
+    {
+      parse: () => {
+        throw new Error('ua');
+      },
+    },
+  );
+  const handler = createOpenTrackingHandler(service.open.bind(service), log);
+  const response = await handler({
+    pathParameters: { trackingId: id },
+    requestContext: { requestId: 'r', http: { sourceIp: '8.8.8.8' } },
+    headers: { 'user-agent': 'raw' },
+  } as Parameters<typeof handler>[0]);
+  expect(response.statusCode).toBe(200);
+  expect(response.headers?.['content-type']).toBe('image/png');
+  expect(repository.createOpenEvent).toHaveBeenCalledOnce();
+});
+
+it('bounds asynchronous geo enrichment and preserves the event after timeout', async () => {
+  vi.useFakeTimers();
+  const { repository, log } = setup();
+  let resolve!: (value: typeof geoResult) => void;
+  const geo = {
+    locate: () =>
+      new Promise<typeof geoResult>((done) => {
+        resolve = done;
+      }),
+  };
+  const service = new OpenTrackingService(repository, log, geo);
+  const pending = service.open(id, metadata, 'r');
+  await vi.advanceTimersByTimeAsync(1000);
+  await pending;
+  expect(repository.createOpenEvent).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ country: null, ...metadata }),
+  );
+  resolve(geoResult);
+  await Promise.resolve();
+  expect(repository.createOpenEvent.mock.calls[0][0].country).toBeNull();
+  expect(vi.getTimerCount()).toBe(0);
 });

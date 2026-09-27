@@ -141,3 +141,47 @@ it.each(['getTracking', 'listOpenEvents'] as const)(
     expect(JSON.stringify(log.mock.calls)).not.toContain('private details');
   },
 );
+
+it.each([
+  {},
+  {
+    country: 'Colombia',
+    region: 'Antioquia',
+    city: 'Medellín',
+    browser: 'Chrome',
+    browserVersion: '130',
+    os: 'Windows',
+    deviceType: 'Desktop',
+  },
+])(
+  'GET returns normalized persisted OPEN enrichment %j',
+  async (enrichment) => {
+    const { DynamoTrackingRepository } =
+      await import('./trackingRepository.js');
+    const { openEnrichmentSchema } = await import('@email-tracker/shared');
+    const stored = {
+      eventId: crypto.randomUUID(),
+      openedAt: record.createdAt,
+      ip: null,
+      userAgent: null,
+      ...enrichment,
+    };
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ Item: record })
+      .mockResolvedValueOnce({ Items: [stored] });
+    const service = new GetTrackingService(
+      new DynamoTrackingRepository({ send }, 'table'),
+    );
+    const handler = createGetTrackingHandler(
+      async () => identity,
+      service.get.bind(service),
+      vi.fn(),
+    );
+    const response = await handler(event());
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body!).events).toEqual([
+      { ...stored, ...openEnrichmentSchema.parse(enrichment) },
+    ]);
+  },
+);

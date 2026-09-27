@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import {
+  openEnrichmentSchema,
   createTrackingRequestSchema,
   createTrackingResponseSchema,
   trackingStatusSchema,
@@ -83,12 +84,18 @@ it('validates query responses with CREATED and nullable metadata', async () => {
       },
     ],
   };
-  expect(getTrackingResponseSchema.parse(open)).toEqual(open);
+  expect(getTrackingResponseSchema.parse(open)).toEqual({
+    ...open,
+    events: open.events.map((event) => ({
+      ...event,
+      ...openEnrichmentSchema.parse({}),
+    })),
+  });
   for (const invalid of [
     { ...empty, status: 'SENT' },
     { ...empty, openCount: -1 },
     { ...empty, licenseId: 'private' },
-    { ...open, events: [{ ...open.events[0], browser: 'future' }] },
+    { ...open, events: [{ ...open.events[0], deviceType: 'future' }] },
   ])
     expect(getTrackingResponseSchema.safeParse(invalid).success).toBe(false);
 });

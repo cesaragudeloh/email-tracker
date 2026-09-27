@@ -1,3 +1,4 @@
+import { MaxMindGeoService } from './geoService.js';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
@@ -29,6 +30,8 @@ export const handler = createOpenTrackingHandler(
           ),
           tableName,
         ),
+        undefined,
+        new MaxMindGeoService(process.env.GEOLITE2_CITY_DB_PATH),
       );
     }
     return service.open(trackingId, metadata, requestId);

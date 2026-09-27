@@ -235,7 +235,10 @@ export class ActivationStack extends Stack {
       memorySize: 256,
       role: pixelRole,
       logGroup: pixelLogs,
-      environment: { TRACKING_TABLE_NAME: trackingTable.tableName },
+      environment: {
+        TRACKING_TABLE_NAME: trackingTable.tableName,
+        GEOLITE2_CITY_DB_PATH: '/var/task/GeoLite2-City.mmdb',
+      },
     });
     api.addRoutes({
       path: '/o/{trackingId}',

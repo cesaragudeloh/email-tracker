@@ -10,15 +10,18 @@
     "license:create": "node dist/licenseCli.js"
   },
   "dependencies": {
-    "@email-tracker/shared": "0.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/lib-dynamodb": "^3.0.0",
     "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@email-tracker/shared": "0.0.0",
     "jose": "^6.0.0",
+    "maxmind": "^5.0.7",
+    "ua-parser-js": "^1.0.41",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.0",
+    "@types/ua-parser-js": "^0.7.39",
     "esbuild": "^0.25.0"
   }
 }

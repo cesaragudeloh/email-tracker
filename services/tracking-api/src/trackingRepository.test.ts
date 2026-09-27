@@ -1,3 +1,4 @@
+import { openEnrichmentSchema } from '@email-tracker/shared';
 import { expect, it, vi } from 'vitest';
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { DynamoTrackingRepository } from './trackingRepository.js';
@@ -89,6 +90,7 @@ it('writes independent OPEN records with chronological unique keys and null meta
     TableName: 'tracking-table',
     Item: {
       ...event,
+      ...openEnrichmentSchema.parse({}),
       PK: `TRACKING#${event.trackingId}`,
       SK: `OPEN#${event.openedAt}#${event.eventId}`,
     },
@@ -145,7 +147,12 @@ it('queries OPEN prefix in ascending order and follows all DynamoDB pages', asyn
     await new DynamoTrackingRepository({ send }, 'table').listOpenEvents(
       record.trackingId,
     ),
-  ).toEqual([first, last]);
+  ).toEqual(
+    [first, last].map((event) => ({
+      ...event,
+      ...openEnrichmentSchema.parse({}),
+    })),
+  );
   expect(send).toHaveBeenCalledTimes(2);
   expect(send.mock.calls[0][0]).toBeInstanceOf(QueryCommand);
   const input = {
@@ -193,4 +200,43 @@ it('rejects malformed persisted OPEN events', async () => {
       record.trackingId,
     ),
   ).rejects.toThrow();
+});
+
+it('persists and returns all enriched fields without changing OPEN keys', async () => {
+  const send = vi.fn().mockResolvedValue({});
+  const repository = new DynamoTrackingRepository({ send }, 'table');
+  const enrichment = {
+    country: 'Colombia',
+    region: 'Antioquia',
+    city: 'Medellín',
+    browser: 'Chrome',
+    browserVersion: '130',
+    os: 'Windows',
+    deviceType: 'Desktop' as const,
+  };
+  const event = {
+    trackingId: record.trackingId,
+    eventId: crypto.randomUUID(),
+    eventType: 'OPEN' as const,
+    openedAt: record.createdAt,
+    ip: '8.8.8.8',
+    userAgent: 'raw',
+    ...enrichment,
+  };
+  await repository.createOpenEvent(event);
+  const item = send.mock.calls[0][0].input.Item;
+  expect(item).toEqual({
+    ...event,
+    PK: `TRACKING#${event.trackingId}`,
+    SK: `OPEN#${event.openedAt}#${event.eventId}`,
+  });
+  send.mockResolvedValue({ Items: [item] });
+  const events = await repository.listOpenEvents(event.trackingId);
+  expect(events[0]).toEqual({
+    eventId: event.eventId,
+    openedAt: event.openedAt,
+    ip: event.ip,
+    userAgent: event.userAgent,
+    ...enrichment,
+  });
 });
