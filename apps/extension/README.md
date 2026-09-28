@@ -1,11 +1,99 @@
-# Email Tracker — activación y control Track email en Gmail
+# Email Tracker — activación y control Track email en Gmail y Outlook Web
+
+## Estado final del MVP (Milestone 15)
+
+Implementación local de Gmail/Outlook, activación, pixel, historial y metadata
+geo/browser/OS/device completada. **AWS, DNS, ACM, GeoLite2 real y validación manual
+completa siguen pendientes**. Ningún paso de deployment se ejecuta automáticamente.
+Las secciones por milestone de este documento conservan contexto de implementación;
+el estado vigente y los procedimientos operativos están en:
+
+- [README final](../../README.md)
+- [Runbook de deployment](../../docs/operations.md)
+- [Checklist smoke Chrome/Edge + Gmail/Outlook](../../docs/smoke-test.md)
+- [Troubleshooting, incluidos CSP y proxies](../../docs/troubleshooting.md)
+
+Producción usa `.env.production` y `VITE_ACTIVATION_API_URL=https://tracking.cesaragudelo.com`.
+Cargar `dist` tras build y recargar las pestañas del proveedor. Administrar licencias
+con create/list/revoke/installations desde el CLI backend, nunca desde la extensión
+ni editando DynamoDB manualmente. Revocar impide reactivaciones, pero un JWT previo
+puede seguir válido hasta su expiración; el popup puede conservar Activated.
+
+**Open detected no demuestra lectura humana.** Gmail proxy, Apple Mail Privacy
+Protection, caché, VPN, proxies corporativos, antivirus/scanners y prefetching pueden
+inflar/reducir el conteo o alterar geo/device. Bloqueo de imágenes puede impedir eventos.
+
+## Milestone 13: Outlook Web
+
+Hosts HTTPS soportados: `outlook.office.com`, `outlook.live.com` y
+`outlook.office365.com`, además de `mail.google.com`. El manifiesto incluye
+únicamente esos matches; no necesita permisos adicionales para leer correo.
+El permiso de acceso al backend sigue generándose desde la URL configurada.
+
+`OutlookAdapter` detecta editores con MutationObserver, incluyendo compose inline
+con estructura reconocible, sin polling. `outlookSelectors.ts` centraliza
+selectores y extracción. Se reutilizan `ComposeSendController`,
+`ComposeTrackingControls`, `TrackingPixel`, el checkbox con Shadow DOM y el
+puente del worker con `trackingRecorder`; no hay historial ni modelo de datos
+específico de Outlook. Gmail conserva sus estrategias DOM y sus tests.
+
+Cada compose empieza OFF y tiene estado independiente. OFF deja pasar el envío.
+ON lee solo el primer destinatario válido de To (chips o input) y el asunto,
+crea tracking e inserta un pixel al final del editor antes de reanudar Send.
+No se lee ni almacena el cuerpo. El asunto vacío es válido. El bloqueo durante
+la petición, la protección de reentrada y el timeout de 20 segundos son comunes
+a Gmail. Fallos de API, metadata o pixel permiten continuar el envío nativo;
+un fallo del pixel puede dejar un registro CREATED en el historial.
+
+Limitaciones conocidas:
+
+- El DOM de Outlook no es una API estable. Se priorizan role, contenteditable,
+  aria-multiline, nombres y atributos de chips; el icono `data-icon-name="Send"`
+  y los atajos anunciados ayudan a identificar Send. Hay fallbacks de etiquetas
+  y texto exacto en inglés/español para Send/Enviar, To/Para y Subject/Asunto.
+  Variantes con otros atributos o idiomas requieren comprobación manual.
+- Solo se intercepta Ctrl+Enter o Cmd+Enter cuando el botón anuncia ese atajo.
+  Enter/Espacio sobre Send también se interceptan. Los demás shortcuts quedan
+  a cargo de Outlook. Preferir click en Send para la prueba manual.
+- Las respuestas inline sin destinatario accesible se envían sin tracking;
+  no se adivina el destinatario desde el mensaje citado. Chips sin una dirección
+  expuesta tampoco permiten tracking. Cc/Bcc no se usan como alternativa.
+- Si Outlook elimina o deshabilita Send durante la espera, no se inventa otro
+  mecanismo de envío: se libera el estado y se registra el warning. Verificar
+  el borrador y enviarlo manualmente. `stop()` retira observer/listeners; una
+  petición ya interceptada puede finalizar su reanudación para no perder Send.
+- Un DOM reciclado exactamente como el mismo compose puede conservar su estado;
+  un nuevo elemento empieza OFF. Popouts, cambios de layout, temas y persistencia
+  del pixel en el HTML enviado requieren validación real.
+- No se ha validado una sesión autenticada real de Outlook en esta implementación.
+  Los tests unitarios jsdom usan fixtures semánticos, no garantizan todos los
+  layouts de Outlook. No incluye Outlook desktop, móvil o envío programado.
+
+Validación manual pendiente (sin AWS ni prueba OPEN):
+
+1. Ejecutar `npm run build`, recargar la extensión en `chrome://extensions`
+   (o `edge://extensions`) y recargar Outlook Web.
+2. Abrir un nuevo correo para una cuenta propia. Verificar un único Track email
+   cerca de Send, inicialmente OFF. Abrir otro compose si el layout lo permite
+   y comprobar que los estados son independientes.
+3. Enviar con OFF: debe llegar una sola vez, sin petición de tracking ni pixel.
+4. En otro compose, activar ON con backend no disponible. Pulsar Send: debe
+   intentar tracking, registrar un mensaje fijo de indisponibilidad y enviar
+   una sola vez. Sin activación válida puede fallar localmente antes del HTTP.
+5. Repetir con el atajo anunciado por Outlook; comprobar que no duplica el envío.
+   Revisar consola y confirmar que no registra destinatario, asunto, cuerpo o JWT.
+6. Cerrar/abrir compose y cambiar entre respuesta inline y nuevo correo; verificar
+   que no se duplican controles. Comprobar también los fallbacks inglés/español.
+7. Recargar Gmail y repetir detección, toggle, OFF y ON con fallback: un solo
+   envío por intento. La inserción con respuesta exitosa se comprueba con mocks
+   unitarios; la entrega real con pixel y OPEN queda pendiente de backend.
 
 Una base Manifest V3 para Chrome y Edge, con TypeScript, Vite, HTML y CSS.
 El popup muestra el estado local de autorización, solicita el código si no existe
 un JWT vigente. Desde el Milestone 11, el service worker realiza la activación y guarda
 la autorización en `chrome.storage.local`; el popup solo recibe el estado público.
 No almacena el código ni muestra el JWT. Incluye un cliente de creación de tracking
-conectado al intento de Send en Gmail cuando Track email está ON, con inserción del pixel antes del envío (Milestone 10).
+conectado al intento de Send en Gmail y Outlook Web cuando Track email está ON, con inserción del pixel antes del envío (Milestone 10).
 
 ## Estructura
 
@@ -15,13 +103,13 @@ conectado al intento de Send en Gmail cuando Track email está ON, con inserció
 - `src/config.ts`: URL central del backend.
 - `src/popup/`: formulario, estado y estilos.
 - `src/background.ts`: inicialización del almacenamiento y puente de creación de tracking.
-- `src/content.ts`: selecciona el proveedor e inicia la detección en Gmail.
+- `src/content.ts`: selecciona el proveedor e inicia la detección en Gmail u Outlook Web.
 - `src/providers/EmailProviderAdapter.ts`: contrato `canHandle`, `start`, `stop` y callback de detección.
-- `src/providers/selectProvider.ts`: selecciona Gmail por HTTPS y host exacto; otros sitios quedan sin adapter.
+- `src/providers/selectProvider.ts`: selecciona Gmail u Outlook Web por HTTPS y host exacto; otros sitios quedan sin adapter.
 - `src/providers/gmail/`: observer y estrategias DOM centralizadas de Gmail.
 - `src/providers/gmail/GmailTrackingControls.ts`: inserción y estado temporal por compose.
 - `src/providers/gmail/GmailSendController.ts`: interceptación, bloqueo temporal y reanudación.
-- `src/api/trackingMessages.ts`: mensajes internos validados entre Gmail y service worker.
+- `src/api/trackingMessages.ts`: mensajes internos validados entre los proveedores y service worker.
 - `src/ui/TrackingToggle.ts` y `.css`: checkbox accesible y estilos encapsulados.
 - `public/manifest.json`: base del manifiesto; Vite añade el permiso del host configurado.
 
@@ -41,10 +129,10 @@ El paquete compartido debe compilarse antes de compilar este workspace aisladame
 `dist/` contiene manifiesto, popup, JS/CSS, worker, content script y los chunks
 locales que Vite genere. Se carga la carpeta completa. No se necesita servidor Vite.
 
-Copia `.env.example` a `.env.production.local` en este workspace y define
-`VITE_ACTIVATION_API_URL` con la URL HTTPS pública de API Gateway cuando exista.
-Sin URL configurada, el build de producción sigue siendo instalable pero la
-activación responde con un mensaje de servicio no disponible.
+La URL pública de producción está en `.env.production` mediante
+`VITE_ACTIVATION_API_URL=https://tracking.cesaragudelo.com`. Para un override
+opcional, copia `.env.example` a `.env.production.local` y ajusta su valor.
+Si el dominio aún no está operativo, la activación no estará disponible.
 
 Para un backend local que ya esté disponible, `npm run build:development --workspace=@email-tracker/extension` usa `http://localhost:3000` por defecto.
 El proyecto no incluye servidor local de activación en este milestone.
@@ -75,8 +163,7 @@ La detección y el control visual funcionan con estado `Activated` o `Not activa
 Cada compose recibe un checkbox **Track email**, inicialmente **OFF**, cerca de
 Send. Marcarlo solo cambia su estado temporal. Desde el Milestone 9, un intento
 de Send con ON crea tracking antes de reanudar el envío; marcar el checkbox por
-sí solo no llama al backend. Desde el Milestone 10 se añade el pixel al final del body antes de reanudar Send. Outlook
-mantiene el mensaje inicial del content script, sin adapter.
+sí solo no llama al backend. Desde el Milestone 10 se añade el pixel al final del body antes de reanudar Send. El Milestone 13 añade el adapter de Outlook Web descrito al final.
 
 `GmailAdapter` recibe el documento y un callback. Al iniciar hace un escaneo inicial
 y mantiene un único `MutationObserver` sobre el documento para altas de nodos y
@@ -111,7 +198,7 @@ Cerrar un compose y abrir otro con un nuevo elemento genera otra detección.
 El log de validación es fijo, una vez por elemento, sin contenido ni datos sensibles:
 
 ```text
-Email Tracker: Gmail compose detected
+Email Tracker: compose detected
 ```
 
 ### Selectores y límites
@@ -505,3 +592,17 @@ Los registros anteriores a este milestone no se recuperan del backend; el histor
 local no se sincroniza entre dispositivos y se pierde al borrar storage/desinstalar.
 No hay paginación visual ni más de 100 registros locales, búsqueda, filtros,
 geolocalización, parsing de navegador/OS/dispositivo, detección de proxies u Outlook.
+
+## Milestone 14: dominio de producción
+
+El build de producción lee `VITE_ACTIVATION_API_URL=https://tracking.cesaragudelo.com`
+desde `.env.production`. API y pixel comparten ese dominio. El manifiesto generado
+permite únicamente el origen configurado; no añade permisos genéricos execute-api.
+No cambian Gmail, Outlook ni CSP. Un override temporal puede definirse en
+`.env.production.local`; requiere recompilar y recargar. Desarrollo conserva
+`http://localhost:3000`. La variable existente no se llama `VITE_API_BASE_URL`.
+
+Inspeccionar `dist/manifest.json` tras build y cargarlo en Chrome/Edge para revisar
+los controles Gmail/Outlook. AWS, DNS y certificado reales siguen pendientes;
+la activación y el envío completo se validarán después del deployment autorizado.
+Ver requisitos y synth offline en la sección Milestone 14 del README raíz.

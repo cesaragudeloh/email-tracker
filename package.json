@@ -2,7 +2,7 @@
   "name": "email-tracker",
   "version": "1.0.0",
   "private": true,
-  "description": "Monorepo para una extensión de seguimiento de correos electrónicos.",
+  "description": "Monorepo para una extensi\u00f3n de seguimiento de correos electr\u00f3nicos.",
   "license": "ISC",
   "type": "module",
   "engines": {
@@ -21,7 +21,10 @@
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "license:create": "npm run license:create --workspace=@email-tracker/tracking-api --"
+    "license:create": "npm run license:create --workspace=@email-tracker/tracking-api --",
+    "license:list": "npm run license:list --workspace=@email-tracker/tracking-api --",
+    "license:revoke": "npm run license:revoke --workspace=@email-tracker/tracking-api --",
+    "license:installations": "npm run license:installations --workspace=@email-tracker/tracking-api --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

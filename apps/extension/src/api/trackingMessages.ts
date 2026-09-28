@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isMailOrigin } from '../providers/providerHosts.js';
 import {
   HISTORY_LIMIT,
   localTrackingRecordSchema,
@@ -54,13 +55,13 @@ export function createTrackingMessageListener(
   ): boolean => {
     const parsed = messageSchema.safeParse(message);
     if (!parsed.success) return false;
-    // Only this extension's top-level Gmail content script may use this bridge.
+    // Only this extension's top-level supported mail content scripts may use this bridge.
     try {
       if (
         sender.id !== extensionId ||
         sender.tab?.id === undefined ||
         sender.frameId !== 0 ||
-        new URL(sender.url ?? '').origin !== 'https://mail.google.com'
+        !isMailOrigin(new URL(sender.url ?? ''))
       )
         return false;
     } catch {

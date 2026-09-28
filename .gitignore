@@ -23,6 +23,7 @@ cdk.out/
 .env
 .env.*
 !.env.example
+!apps/extension/.env.production
 
 # Temporales de sistema operativo e IDE
 .DS_Store

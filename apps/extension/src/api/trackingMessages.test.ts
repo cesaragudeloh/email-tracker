@@ -79,7 +79,9 @@ it('worker bridge delegates to the existing client with storage and fetch, retur
 });
 it.each([
   { ...sender, id: 'foreign-extension' },
-  { ...sender, url: 'https://outlook.live.com/' },
+  { ...sender, url: 'https://outlook.live.com.evil.test/' },
+  { ...sender, url: 'https://outlook.live.com:444/' },
+  { ...sender, url: 'http://outlook.office.com/' },
   { ...sender, url: 'https://mail.google.com.evil.test/' },
   { ...sender, url: 'http://mail.google.com/' },
   { ...sender, url: undefined },
@@ -326,3 +328,30 @@ it('bounds an unresponsive worker and returns a retryable error', async () => {
     vi.useRealTimers();
   }
 });
+
+it.each(['outlook.office.com', 'outlook.live.com', 'outlook.office365.com'])(
+  'allows the top-level Outlook bridge for %s without granting history access',
+  async (host) => {
+    const outlookSender = { ...sender, url: `https://${host}/mail/` };
+    const create = vi.fn().mockResolvedValue(tracking);
+    const reply = await new Promise((resolve) => {
+      expect(
+        createTrackingMessageListener(create, 'extension-id')(
+          message,
+          outlookSender,
+          resolve,
+        ),
+      ).toBe(true);
+    });
+    expect(create).toHaveBeenCalledExactlyOnceWith(request);
+    expect(reply).toEqual({ ok: true, tracking });
+    expect(
+      createTrackingQueryListener(
+        vi.fn(),
+        vi.fn(),
+        async () => true,
+        'extension-id',
+      )(getMessage, outlookSender, vi.fn()),
+    ).toBe(false);
+  },
+);

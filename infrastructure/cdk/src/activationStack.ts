@@ -14,16 +14,28 @@ import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { HttpApi, HttpMethod, CfnStage } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import type { Construct } from 'constructs';
+import {
+  configureCustomDomain,
+  TRACKING_BASE_URL,
+  type CustomDomainConfig,
+} from './customDomain.js';
 
 interface ActivationStackProps extends StackProps {
   jwtTtlSeconds?: number;
   lambdaCode?: Code;
   trackingBaseUrl?: string;
+  customDomain?: CustomDomainConfig;
 }
 
 export class ActivationStack extends Stack {
   constructor(scope: Construct, id: string, props: ActivationStackProps = {}) {
     super(scope, id, props);
+    const trackingBaseUrl =
+      props.trackingBaseUrl?.replace(/\/+$/, '') ?? TRACKING_BASE_URL;
+    if (props.customDomain && trackingBaseUrl !== TRACKING_BASE_URL)
+      throw new Error(
+        'Custom domain requires TRACKING_BASE_URL=https://tracking.cesaragudelo.com',
+      );
     const ttl = props.jwtTtlSeconds ?? 86400;
     if (!Number.isInteger(ttl) || ttl < 1 || ttl > 86400)
       throw new Error('Invalid JWT TTL');
@@ -93,6 +105,8 @@ export class ActivationStack extends Stack {
     const api = new HttpApi(this, 'ActivationApi', {
       apiName: 'Email Tracker Activation',
     });
+    if (props.customDomain)
+      configureCustomDomain(this, api, props.customDomain);
     api.addRoutes({
       path: '/api/activate',
       methods: [HttpMethod.POST],
@@ -144,9 +158,7 @@ export class ActivationStack extends Stack {
       environment: {
         TRACKING_TABLE_NAME: trackingTable.tableName,
         JWT_SECRET_ARN: secret.secretArn,
-        ...(props.trackingBaseUrl
-          ? { TRACKING_BASE_URL: props.trackingBaseUrl }
-          : {}),
+        TRACKING_BASE_URL: trackingBaseUrl,
       },
     });
     api.addRoutes({
@@ -194,9 +206,7 @@ export class ActivationStack extends Stack {
       environment: {
         TRACKING_TABLE_NAME: trackingTable.tableName,
         JWT_SECRET_ARN: secret.secretArn,
-        ...(props.trackingBaseUrl
-          ? { TRACKING_BASE_URL: props.trackingBaseUrl }
-          : {}),
+        TRACKING_BASE_URL: trackingBaseUrl,
       },
     });
     api.addRoutes({

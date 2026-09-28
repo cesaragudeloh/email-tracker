@@ -191,3 +191,28 @@ it('two concurrent installations cannot claim the same last slot', async () => {
     'DEVICE_LIMIT_REACHED',
   );
 });
+
+it('rejects activation after revoke while previously issued JWTs last until exp', async () => {
+  const issued = await service()(request);
+  license.status = 'REVOKED';
+  repository.register.mockClear();
+  signingKey.mockClear();
+  await expect(
+    service()({ ...request, installationId: crypto.randomUUID() }),
+  ).rejects.toMatchObject({ code: 'LICENSE_REVOKED' });
+  await expect(service()(request)).rejects.toMatchObject({
+    code: 'LICENSE_REVOKED',
+  });
+  expect(repository.register).not.toHaveBeenCalled();
+  expect(signingKey).not.toHaveBeenCalled();
+  await expect(
+    verifyToken(issued.accessToken, key, new Date((now + 1) * 1000)),
+  ).resolves.toMatchObject({ licenseId: license.licenseId });
+  await expect(
+    verifyToken(
+      issued.accessToken,
+      key,
+      new Date((now + issued.expiresIn) * 1000),
+    ),
+  ).rejects.toThrow();
+});

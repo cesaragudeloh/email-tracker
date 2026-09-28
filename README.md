@@ -1,39 +1,85 @@
 # Email Tracker
 
-Extensión Chromium para Google Chrome y Microsoft Edge. El Milestone 12 añade geolocalización aproximada y parsing de User-Agent al detalle de aperturas en el popup al flujo de Gmail con tracking cuando Track email
-está ON, sobre la consulta protegida, historial, pixel público y activación existentes. El service worker obtiene y almacena la autorización firmada
-por el backend; el popup recibe solo el estado `Activated`. Una carga del pixel registra una apertura detectada; Gmail añade el pixel antes de reanudar Send; la validación manual real está pendiente.
+MVP de una extensión para **Google Chrome y Microsoft Edge**, compatible con
+**Gmail Web y Outlook Web**. Permite activar una licencia, habilitar **Track email**
+en un compose e insertar un pixel único antes de enviar. El popup muestra correos
+rastreados y el historial de aperturas detectadas, con fecha, IP observada,
+User-Agent, ubicación aproximada, navegador, sistema operativo y dispositivo
+cuando pueden determinarse. No guarda el cuerpo ni adjuntos.
 
-## Arquitectura implementada
+**“Open detected” NO significa necesariamente que una persona leyó el correo.**
 
-```text
-Popup de la extensión → POST /api/activate → API Gateway HTTP API
-                                             ↓
-                                      Activation Lambda
-                                        ↙          ↘
-                                  DynamoDB      Secrets Manager
+## MVP Status
 
-Cliente de extensión → POST /api/tracking → CreateTracking Lambda
-                                           (verifica JWT)
-                                                 ↓
-                                      DynamoDB EmailTracking
-                                                 ↑
-Cliente de extensión → GET /api/tracking/{trackingId} → GetTracking Lambda
-                                                  (JWT + ownership por licencia)
+**Implemented locally:** Gmail, Outlook, activación, tracking, popup, geo/device,
+infraestructura de dominio HTTPS y CLI administrativo create/list/revoke/installations.
+
+**Pending production validation:** AWS deploy, DNS, ACM real, GeoLite2 real y
+validación manual del flujo completo en producción. No hay AWS desplegado ni
+producción validada como parte del cierre. Los tests automáticos son únicamente
+unitarios; no hay tests E2E. Este cierre no añade funcionalidades posteriores al MVP.
+
+## Arquitectura
+
+```mermaid
+flowchart TD
+  E[Extensión Chrome / Edge] --> D[tracking.cesaragudelo.com]
+  R[Route53 alias A] --> D
+  C[ACM regional / TLS 1.2] --> D
+  D --> API[API Gateway HTTP API]
+  API --> A[Activation Lambda]
+  API --> T[Create Tracking Lambda]
+  API --> O[Open Pixel Lambda]
+  API --> G[Get Tracking Lambda]
+  A --> L[(DynamoDB Licenses)]
+  T --> H[(DynamoDB EmailTracking)]
+  O --> H
+  G --> H
+  A --> S[Secrets Manager]
+  T --> S
+  G --> S
+  O --> M[GeoLite2 local / ua-parser-js]
 ```
 
-- `apps/extension`: Manifest V3, TypeScript strict, Vite, HTML y CSS, sin React.
-- `services/tracking-api`: handler, servicio, repositorio DynamoDB, firma JWT y CLI.
-- `packages/shared`: contratos Zod, normalización y tipos compartidos.
-- `infrastructure/cdk`: dos tablas, un secreto, cuatro Lambdas Node.js 22 y cuatro rutas HTTP.
-- Herramientas: Node.js 24 y npm 11 para desarrollo, ESLint, Prettier y Vitest.
+| Ruta                             | Acceso y resultado                                                                                         |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `POST /api/activate`             | Público, valida código/licencia/cupos; entrega JWT tras registrar instalación.                             |
+| `POST /api/tracking`             | JWT verificado en Lambda; crea UUID y devuelve `trackingUrl`.                                              |
+| `GET /api/tracking/{trackingId}` | JWT y pertenencia a la licencia; devuelve historial y agregados derivados.                                 |
+| `GET /o/{trackingId}`            | Público; UUID válido y tracking existente; almacena un OPEN independiente y devuelve PNG transparente 1×1. |
 
-La infraestructura está preparada, **no desplegada**. No se configura dominio,
-certificado, authorizer externo ni Cognito. La creación y consulta de tracking verifican JWT en Lambda; el pixel es público.
+El dominio definitivo es `https://tracking.cesaragudelo.com`. La URL del pixel es
+`https://tracking.cesaragudelo.com/o/{trackingId}`. API y pixel comparten mapping
+raíz al stage `$default`; no hay CloudFront ni stages adicionales.
+El endpoint execute-api queda habilitado para diagnóstico inicial, no como URL
+pública del producto. La autorización continúa dentro de las Lambdas.
 
-## Instalación y validación local
+## Features MVP y providers
 
-Desde la raíz:
+- Activación por código, installationId persistente y límite de dispositivos.
+- Track email inicialmente OFF e independiente por compose; creación backend antes
+  del envío, inserción del pixel y prevención de controles/envíos duplicados.
+- Cada OPEN es un evento separado. `openCount`, `firstOpenedAt` y `lastOpenedAt`
+  se calculan desde el historial, no desde un contador almacenado como única verdad.
+- Enriquecimiento tolerante a fallos: sin geo/UA disponible se conserva el OPEN.
+- Popup con los 100 tracking recientes guardados localmente, detalle y Refresh manual.
+- Administración por CLI, sin editar DynamoDB manualmente ni dashboard.
+
+Hosts: `mail.google.com`, `outlook.office.com`, `outlook.live.com` y
+`outlook.office365.com`, todos HTTPS. Los adapters y selectores son independientes;
+comparten controles, envío, pixel, API y almacenamiento. Solo se utiliza el primer
+To válido; no hay tracking individual de múltiples destinatarios.
+
+Si la creación, metadata o inserción falla, el envío nativo puede continuar sin
+tracking. Un registro CREATED no demuestra que el correo se envió. Respuestas
+inline sin metadata accesible, variantes del DOM, idiomas y shortcuts requieren
+validación manual. No se soportan Outlook desktop, Gmail/Outlook móvil, Firefox,
+Safari, envíos programados ni integraciones nativas.
+Ver [detalles de la extensión](apps/extension/README.md).
+
+## Dev setup, build y tests
+
+Node.js **24**, npm **11**, TypeScript strict. Desde la raíz:
 
 ```sh
 npm ci
@@ -41,715 +87,177 @@ npm run build
 npm run lint
 npm test
 npm run format:check
-```
-
-El build compila primero el paquete compartido, genera la extensión instalable en
-`apps/extension/dist`, empaqueta la Lambda y compila CDK. No necesita credenciales
-AWS. `npm run format` aplica el formato; conserva `AGENTS.md` sin cambios.
-
-Vitest ejecuta tests unitarios con mocks de DynamoDB, Secrets Manager, `fetch` y
-`chrome.storage`. También comprueba firma/expiración de JWT y plantillas CDK.
-Los tests resuelven el código fuente compartido y pueden ejecutarse antes del build.
-No se usan E2E ni se contacta AWS durante los tests.
-
-Para sintetizar CloudFormation localmente, después del build:
-
-```sh
 npm run synth --workspace=@email-tracker/cdk -- --no-lookups
+ENABLE_CUSTOM_DOMAIN=true npm run synth --workspace=@email-tracker/cdk -- --no-lookups
 ```
 
-Esto genera `infrastructure/cdk/cdk.out/`; no crea recursos. La Lambda se empaqueta
-con esbuild y sus dependencias, sin Docker ni bundling remoto durante la síntesis.
+Build compila shared, genera `apps/extension/dist`, empaqueta las cuatro Lambdas
+con esbuild en `services/tracking-api/build/lambda` y compila CDK. No requiere
+credenciales. Si el entorno tiene pocos recursos, usar `npm test -- --maxWorkers=2`.
+Vitest usa mocks de AWS/fetch/storage, firma JWT real con claves de prueba, jsdom
+para adapters y assertions CDK. No se contacta AWS ni se ejecutan tests E2E.
 
-## Flujo de activación
+Los synth generan CloudFormation localmente, con dominio OFF/ON respectivamente.
+El dominio usa importación Route53 por atributos, sin lookups. Sin ID se genera
+el parámetro obligatorio `HostedZoneId`, sin inventar valores.
 
-1. La extensión crea `installationId` con `crypto.randomUUID()` y lo guarda en
-   `chrome.storage.local`. Web Locks serializa la creación entre popup y worker.
-2. Al abrir el popup se consulta la autorización local. Un token ausente,
-   malformado, expirado o de otra instalación produce `Not activated`.
-3. El usuario introduce un código. El cliente envía JSON a `POST /api/activate`.
-4. Zod valida UUID y código; se normaliza con `trim().toUpperCase()` y se calcula
-   SHA-256. Se aceptan 8–128 caracteres ASCII alfanuméricos, con guiones o guiones
-   bajos entre grupos. No se requiere un prefijo visual específico.
-5. El backend comprueba existencia, estado `ACTIVE`, expiración y cupos. Una
-   instalación ya activa puede reactivarse sin incrementar el contador.
-6. Una transacción comprueba de nuevo la licencia y registra la instalación; las
-   condiciones evitan superar `maxDevices` incluso ante peticiones simultáneas.
-7. La Lambda firma el JWT y solo entrega el resultado después de confirmar el
-   registro. La extensión almacena la autorización, nunca el código, y muestra
-   `Activated`. El campo del código se limpia al enviarlo.
-
-El endpoint devuelve `{ status, accessToken, expiresIn, licenseId, installationId }`.
-Errores: 400 `INVALID_REQUEST`; 403 `INVALID_CODE`, `LICENSE_REVOKED`,
-`LICENSE_EXPIRED`, `DEVICE_LIMIT_REACHED` o `INSTALLATION_REVOKED`; 500
-`SERVICE_UNAVAILABLE`. Las respuestas incluyen `Cache-Control: no-store`.
-No se devuelven errores AWS, hashes ni stack traces.
-
-Los logs de Lambda contienen solo requestId, installationId validado, licenseId
-cuando se conoce y el resultado; nunca códigos, hashes, tokens o secretos.
-
-## Diseño DynamoDB
-
-La tabla de licencias tiene claves string `PK`/`SK`, capacidad bajo demanda y retención al retirar
-el stack. No utiliza Scan ni GSI:
-
-| Registro          | PK                    | SK                    | Atributos principales                                                                                         |
-| ----------------- | --------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Búsqueda por hash | `CODE#<sha256>`       | `LOOKUP`              | `licenseId`                                                                                                   |
-| Licencia          | `LICENSE#<licenseId>` | `LICENSE`             | `licenseId`, `activationCodeHash`, `status`, `maxDevices`, `activeDevices`, `createdAt`, `expiresAt` opcional |
-| Instalación       | `LICENSE#<licenseId>` | `INSTALLATION#<uuid>` | `installationId`, `status`, `activatedAt`, `lastSeenAt`                                                       |
-
-El registro de búsqueda permite dos `GetItem` consistentes para encontrar la
-licencia. El CLI crea búsqueda y licencia atómicamente, evitando duplicados. Los
-estados son `ACTIVE` y `REVOKED`. Las fechas descriptivas son ISO UTC; `expiresAt`
-es epoch en **segundos**, no milisegundos. No se habilita TTL de DynamoDB: expirar
-una licencia no debe borrar su historial de autorización.
-
-Una instalación nueva usa `TransactWriteItems`: incremento condicionado a
-`activeDevices < maxDevices` y alta con `attribute_not_exists(PK)`. La reactivación
-comprueba licencia e instalación activas y solo actualiza `lastSeenAt`. Los
-conflictos se releen y reintentan de forma acotada. No hay liberación automática de
-cupos ni interfaz administrativa de revocación; no modificar contadores de forma
-independiente. Revocar una licencia mediante su campo `status` bloquea nuevas
-activaciones y reactivaciones.
-
-## JWT y límites de la autorización local
-
-Se usa `jose`, HS256, `iss=email-tracker`, `aud=email-tracker-extension` y claims
-`licenseId`, `installationId`, `iat`, `exp`. La duración predeterminada es 86400
-segundos, configurable entre 1 y 86400, y nunca supera la expiración de la licencia.
-
-Secrets Manager genera un secreto JSON `{ "signingKey": "..." }` de 64 caracteres;
-Lambda recibe únicamente su ARN y obtiene el valor con `GetSecretValue`. No se
-incluye ningún secreto en el repositorio, el manifiesto o la extensión.
-
-El estado local decodifica claims para la UI: **no verifica la firma ni concede
-permisos backend**. No se guarda un booleano `isActivated` como autoridad. El acceso
-a `chrome.storage.local` se restringe a `TRUSTED_CONTEXTS`, excluyendo content
-scripts. El JWT es un bearer token local, no un vínculo criptográfico al dispositivo.
-Borrar datos o reinstalar puede crear otro UUID y consumir otro cupo.
-
-La utilidad backend `verifyToken` comprueba firma, algoritmo, issuer, audience y
-expiración y claims; se reutiliza en `POST /api/tracking`.
-La revocación no invalida automáticamente un JWT ya emitido: el endpoint de tracking no consulta el estado de la licencia y acepta el token hasta `exp` (hasta 24 horas). El popup puede continuar
-mostrando `Activated` hasta esa expiración. No existe renovación automática.
-
-## Crear licencias
-
-Después de `npm run build`, preparar una licencia **sin contactar AWS**:
-
-```sh
-npm run license:create -- --max-devices 2
-```
-
-Opcionalmente añade `--expires-at 2027-12-31T23:59:59Z` (debe ser una fecha futura).
-El CLI muestra el código una sola vez y los dos objetos listos para insertar,
-con el hash únicamente. El código tiene 192 bits aleatorios. Conserva y entrega el
-código de forma privada; no redirijas la salida a archivos, logs ni al repositorio.
-El modo de preparación no inserta nada y no permite activar todavía.
-
-Con el backend desplegado, credenciales AWS del administrador y el nombre real de
-la tabla obtenido del output `LicenseTableName`:
-
-```sh
-npm run license:create -- --max-devices 2 --table NOMBRE_REAL_TABLA --write
-```
-
-El SDK usa la cadena habitual de credenciales (`AWS_PROFILE`, `AWS_REGION`, etc.).
-El usuario administrativo necesita `dynamodb:PutItem` sobre esa tabla para los dos
-Put transaccionales. El CLI no concede permisos ni configura credenciales. Solo
-muestra el código tras confirmar la escritura; si falla, termina con error genérico.
+| Carpeta                 | Responsabilidad                                                         |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `apps/extension`        | Manifest V3, Vite, HTML/CSS/TS, adapters y popup; sin React.            |
+| `services/tracking-api` | Handlers, servicios, repositorios, JWT, pixel y CLI.                    |
+| `packages/shared`       | Contratos Zod y tipos comunes.                                          |
+| `infrastructure/cdk`    | Dos tablas, cuatro Lambdas, HTTP API, secreto, logs y dominio opcional. |
+| `docs`                  | Runbook, smoke checklist y troubleshooting.                             |
 
 ## Configuración
 
-| Variable/configuración      | Lugar                                         | Uso                                                       |
-| --------------------------- | --------------------------------------------- | --------------------------------------------------------- |
-| `VITE_ACTIVATION_API_URL`   | `apps/extension/.env.production.local`        | URL pública del output `ApiUrl`, sin `/api/activate`      |
-| `VITE_ACTIVATION_API_URL`   | `.env.development.local` dentro del workspace | URL de desarrollo; predeterminado `http://localhost:3000` |
-| `LICENSE_TABLE_NAME`        | Entorno Lambda, asignado por CDK              | Tabla de licencias                                        |
-| `JWT_SECRET_ARN`            | Entorno Lambda, asignado por CDK              | ARN, nunca valor del secreto                              |
-| `JWT_TTL_SECONDS`           | Entorno Lambda, asignado por CDK              | Duración JWT                                              |
-| `jwtTtlSeconds`             | Contexto CDK (`-c jwtTtlSeconds=3600`)        | Configura la duración al sintetizar/desplegar             |
-| `AWS_PROFILE`, `AWS_REGION` | Shell administrativo                          | Cuenta y región para operaciones AWS                      |
+| Variable / opción                                             | Uso                                                                                                                                                    |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `VITE_ACTIVATION_API_URL`                                     | `.env.production` de extensión: `https://tracking.cesaragudelo.com`. Es la variable real; no usar `VITE_API_BASE_URL`.                                 |
+| `.env.production.local`                                       | Override local opcional de Vite; no versionar; recompilar y recargar.                                                                                  |
+| `build:development`                                           | `npm run build:development --workspace=@email-tracker/extension`; usa `http://localhost:3000`. No incluye un servidor backend local.                   |
+| `ENABLE_CUSTOM_DOMAIN`                                        | `true` habilita dominio; omitido/`false` lo desactiva.                                                                                                 |
+| `HOSTED_ZONE_ID`                                              | Zona pública existente `cesaragudelo.com`, en la misma cuenta. Formato `Z…`, sin `/hostedzone/`. Requiere dominio ON.                                  |
+| `TRACKING_BASE_URL`                                           | CDK inyecta la base sin `/o`; default dominio definitivo. Con dominio OFF admite override local; ON exige la URL definitiva. Normaliza barras finales. |
+| `jwtTtlSeconds`                                               | Contexto CDK, 1–86400 segundos; default 86400.                                                                                                         |
+| `GEOLITE2_CITY_DB_PATH`                                       | Ruta privada a MMDB al compilar. Lambda usa `/var/task/GeoLite2-City.mmdb`.                                                                            |
+| `LICENSE_TABLE_NAME`, `TRACKING_TABLE_NAME`, `JWT_SECRET_ARN` | Inyectados por CDK; ARN del secreto, nunca valor.                                                                                                      |
+| `--table`, `--region`                                         | Configuración administrativa CLI. SDK usa la cadena predeterminada de credenciales, sin cuenta/región/profile hardcodeados.                            |
 
-El build de producción sin URL es instalable y muestra `Not activated`; al intentar
-activar muestra `Activation service unavailable`. No tiene backend ficticio.
-Al definir una URL HTTPS, el build genera un permiso de host limitado a ese origen.
-La URL se centraliza en `src/config.ts`. HTTP solo se acepta para localhost en modo
-development. La extensión no necesita CORS abierto gracias al permiso de host.
+CDK lee variables del proceso, no carga `.env` automáticamente. Cuenta y región
+se resuelven con el entorno/perfil seleccionado para deployment. La extensión
+genera `host_permissions` solo para el origen API configurado. CORS y CSP no se
+amplían: las llamadas HTTP salen del service worker, mediante mensajería desde
+popup/content scripts.
 
-```sh
-npm run build:development --workspace=@email-tracker/extension
-```
+## Admin CLI
 
-Este comando configura localhost, pero **no inicia un servidor**: no se implementa
-un backend local ni un emulador AWS en este milestone.
-
-## Deployment futuro — solo con autorización explícita
-
-Estos comandos **crean o modifican recursos AWS** y no forman parte de la validación
-local. Antes, configura la cuenta y región deseadas. El stack utiliza permisos
-DynamoDB específicos sobre su tabla (`GetItem`, `PutItem`, `UpdateItem`,
-`ConditionCheckItem`), `GetSecretValue` sobre su secreto y escritura sobre su grupo
-de logs. La API tiene throttling básico; no se registra el cuerpo de peticiones.
+Compilar antes de usar. Los ejemplos AWS son para **después del deployment
+explícitamente autorizado**; no se ejecutan durante este milestone.
 
 ```sh
-npm run build
-npm run synth --workspace=@email-tracker/cdk -- --no-lookups
-# Solo si la cuenta/región aún no está preparada para CDK:
-npm run bootstrap --workspace=@email-tracker/cdk -- aws://CUENTA/REGION
-npm run deploy --workspace=@email-tracker/cdk -- -c jwtTtlSeconds=86400
+# Local: crea una propuesta nueva sin almacenarla ni contactar AWS.
+npm run license:create -- --max-devices 2
+# Real: código nuevo; no es el mismo que el dry-run anterior.
+npm run license:create -- --max-devices 2 --table TABLE_NAME --region REGION --write
+# Lecturas reales cuando exista AWS:
+npm run license:list -- --table TABLE_NAME --region REGION
+npm run license:installations -- --license-id LICENSE_ID --table TABLE_NAME --region REGION
+# Dry-run local, no comprueba existencia:
+npm run license:revoke -- --license-id LICENSE_ID --table TABLE_NAME
+# Escritura explícita e idempotente:
+npm run license:revoke -- --license-id LICENSE_ID --table TABLE_NAME --region REGION --write
 ```
 
-Guarda los outputs `ApiUrl` y `LicenseTableName`. No se configura
-`tracking.cesaragudelo.com`, Route53 ni ACM. Tabla, secreto y logs se retienen al
-retirar el stack; el despliegue puede generar costes.
-
-## Validación manual del popup
-
-**Sin AWS:** ejecuta build/lint/tests/format, prepara una licencia sin `--write`,
-carga la extensión y verifica `Not activated`, UUID persistente, validación de campo
-vacío y mensaje de servicio no disponible al no tener URL. Esto no demuestra una
-activación real.
-
-**Con AWS desplegado y licencia insertada:**
-
-1. Configura `VITE_ACTIVATION_API_URL` con el output `ApiUrl` en
-   `apps/extension/.env.production.local` y vuelve a ejecutar `npm run build`.
-2. Chrome: abre `chrome://extensions`, activa **Developer mode**, pulsa
-   **Load unpacked** y selecciona `apps/extension/dist` (Windows:
-   `C:\Projects\email-tracker\apps\extension\dist`). Si ya está instalada, pulsa
-   **Reload**. En Edge, usa `edge://extensions` con los mismos pasos.
-3. Abre **Email Tracker** desde el menú de extensiones. En una instalación nueva,
-   comprueba **Status: Not activated** y un UUID. Cierra y abre el popup: debe
-   conservar el mismo UUID.
-4. Introduce el código creado con `--write` y pulsa **Activate**. Debe mostrar
-   **Status: Activated**, ocultar el formulario y no mostrar el JWT.
-5. Cierra y abre de nuevo: debe conservar `Activated` mientras el token no expire.
-6. Con una licencia de `maxDevices=1`, otro perfil del navegador debe recibir
-   **Device limit reached**. No uses el mismo directorio de perfil.
-7. Para comprobar reactivación, elimina únicamente la clave `authorization` desde
-   el almacenamiento de la extensión en DevTools (sin imprimir su valor), conserva
-   `installationId` y vuelve a introducir el código. No debe aumentar el contador.
-8. Un código inexistente debe mostrar **Invalid activation code**. Una licencia
-   revocada o expirada debe devolver su mensaje correspondiente al reactivarse.
-
-El flujo exitoso de `POST /api/activate`, la persistencia real en DynamoDB y el
-acceso IAM a Secrets Manager requieren AWS. Los tests unitarios usan mocks y no
-sustituyen esa validación de deployment.
-
-## Fuera del Milestone 12
-
-No se implementan Outlook, detección avanzada de proxies, dashboard ni link tracking. Gmail conserva su adapter
-y checkbox del Milestone 5: ahora intercepta Send y crea tracking mediante el worker,
-e inserta el pixel al final del body antes de reanudar Send.
-
-Referencias: [transacciones e IAM de DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html),
-[almacenamiento de extensiones Chromium](https://developer.chrome.com/docs/extensions/reference/api/storage).
-
-## Milestone 6: crear tracking
-
-`POST /api/tracking` requiere `Authorization: Bearer <JWT>` emitido por activación
-y JSON con exactamente estos campos:
-
-```json
-{
-  "recipient": "client@example.com",
-  "subject": "Technical Interview Follow-up"
-}
-```
-
-Zod exige email válido (máximo 254 caracteres) y asunto string de hasta 998
-caracteres; permite asunto vacío. Rechaza campos adicionales, incluyendo IDs,
-identidades, body, adjuntos o credenciales. El handler limita el cuerpo a 16 KiB.
-
-Devuelve **201** tras persistir:
-
-```json
-{
-  "trackingId": "8a73e54e-c33f-40ca-a2dc-06626851744d",
-  "trackingUrl": "https://tracking.cesaragudelo.com/o/8a73e54e-c33f-40ca-a2dc-06626851744d",
-  "createdAt": "2026-09-24T10:00:00.000Z"
-}
-```
-
-`trackingUrl` apunta a `GET /o/{trackingId}`, implementado en el Milestone 7.
-El dominio de producción todavía requiere configuración y despliegue fuera de este alcance.
-`TrackingService` genera el UUID con `crypto.randomUUID()` en backend. La tabla
-independiente `EmailTracking` usa `PK=TRACKING#{trackingId}`, `SK=EMAIL` y conserva
-`trackingId`, `recipient`, `subject`, `createdAt`, `licenseId`, `installationId`,
-`status=CREATED`. CREATED significa registro creado, sin confirmar envío.
-Un PutItem condicional evita sobrescrituras; crear EMAIL no crea eventos OPEN ni contadores.
-
-La ruta comparte API Gateway con activación y usa una Lambda y un rol propios:
-solo `dynamodb:PutItem` sobre la tabla de tracking, lectura del secreto JWT existente
-y escritura en su grupo de logs. La tabla es bajo demanda y se retiene al retirar
-el stack. El output `TrackingTableName` identifica su nombre físico.
-
-La autorización está aislada en `authorization.ts` y reutiliza `verifyToken` sin
-duplicar criptografía. Entrega únicamente la identidad validada al servicio y
-permite añadir una comprobación de revocación posteriormente. **Revocar una licencia
-no invalida JWT existentes**; siguen autorizando creación hasta su expiración.
-
-Errores: **400** `INVALID_REQUEST`, **401** `UNAUTHORIZED` (token ausente, inválido o
-expirado), **500** `SERVICE_UNAVAILABLE`. Fallos de Secrets Manager o DynamoDB son
-500 sin detalles internos. Respuestas con `no-store`; logs estructurados contienen
-solo requestId, resultado y trackingId en éxito. No se registran tokens ni PII.
-
-Configuración adicional:
-
-- `TRACKING_TABLE_NAME`: inyectada por CDK en CreateTracking Lambda.
-- `JWT_SECRET_ARN`: el mismo secreto de activación, nunca su valor.
-- `TRACKING_BASE_URL`: opcional, por defecto `https://tracking.cesaragudelo.com`,
-  centralizado en `trackingConfig.ts`. Acepta HTTPS o HTTP localhost para desarrollo.
-  Definirla al ejecutar CDK la inyecta en Lambda; elimina barras finales.
-- La extensión reutiliza `config.apiBaseUrl` y `VITE_ACTIVATION_API_URL` para ambas
-  rutas. Se conserva el nombre de variable existente por compatibilidad; su valor
-  es la base pública de API Gateway, sin `/api/activate` ni `/api/tracking`.
-
-`createTrackingClient().createTracking({ recipient, subject })` lee la autorización
-almacenada desde el service worker, envía Bearer y
-valida la respuesta compartida. Sin autorización local vigente no hace fetch.
-Mapea 401 a una indicación de reactivación y los errores de red a indisponibilidad.
-Desde el Milestone 9 Gmail la invoca mediante el worker al intentar Send con Track ON.
-Los reintentos manuales crean registros nuevos; no se implementa idempotencia.
-
-### Validación sin AWS
-
-```sh
-npm run build
-npm run lint
-npm test
-npm run format:check
-npm run synth --workspace=@email-tracker/cdk -- --no-lookups
-```
-
-Los tests ejercitan JWT reales firmados con claves de prueba, contratos, handler,
-servicio, repositorio con DynamoDB mockeado, cliente con storage/fetch mockeados e IAM
-sintetizado. No requieren cuenta AWS. Synth genera CloudFormation, sin desplegar.
-Carga la extensión compilada y comprueba manualmente que alternar Track email no
-produce solicitudes a `/api/tracking` y que el contenido del correo se conserva.
-
-### Validación opcional en AWS
-
-1. Desplegar el stack `EmailTrackerActivation` con los comandos de deployment ya
-   documentados: añade tabla EmailTracking, Lambda CreateTracking, logs, IAM e
-   integración/ruta en la API existente. No se configura el dominio de tracking.
-2. Crear una licencia con el CLI existente usando `--write` y `LicenseTableName`.
-3. Activar la extensión o solicitar un JWT con un installationId UUID:
-
-```sh
-curl -X POST "$API_BASE_URL/api/activate" \
-  -H 'Content-Type: application/json' \
-  --data '{"activationCode":"CODIGO_DE_LICENCIA","installationId":"8a73e54e-c33f-40ca-a2dc-06626851744d"}'
-```
-
-4. Usar el `accessToken` devuelto como variable local `JWT`, sin guardarlo en el
-   repositorio ni compartirlo. `API_BASE_URL` es el output `ApiUrl`:
-
-```sh
-curl -i -X POST "$API_BASE_URL/api/tracking" \
-  -H "Authorization: Bearer $JWT" \
-  -H 'Content-Type: application/json' \
-  --data '{"recipient":"client@example.com","subject":"Technical Interview Follow-up"}'
-```
-
-5. Esperar 201 y comprobar en la tabla el registro EMAIL con CREATED e identidad
-   de la licencia/instalación. Repetir sin Authorization debe producir 401; con JWT
-   válido y recipient inválido, 400. Para probar el pixel en la URL de API Gateway,
-   seguir la validación del Milestone 7.
-
-## Milestone 7: pixel público y eventos OPEN
-
-`GET /o/{trackingId}` no requiere JWT, Authorization ni API key: lo consume el
-cliente de correo. `openTrackingHandler` traduce HTTP, `OpenTrackingService` valida
-UUID con Zod, confirma EMAIL y construye el evento; `TrackingRepository` ejecuta
-GetItem consistente y PutItem sobre la misma tabla `EmailTracking`. Se acepta el
-UUID únicamente de `pathParameters` y se normaliza a minúsculas para la clave.
-
-Cada carga crea un registro independiente, incluso en el mismo milisegundo:
-
-```text
-PK = TRACKING#{trackingId}
-SK = OPEN#{openedAt}#{eventId}
-```
-
-```json
-{
-  "eventId": "550e8400-e29b-41d4-a716-446655440000",
-  "trackingId": "8a73e54e-c33f-40ca-a2dc-06626851744d",
-  "eventType": "OPEN",
-  "openedAt": "2026-09-24T21:15:22.123Z",
-  "ip": "192.0.2.1",
-  "userAgent": "Raw mail client User-Agent"
-}
-```
-
-`eventId` se genera con `crypto.randomUUID()`; `openedAt` es ISO UTC. La IP procede
-exclusivamente de `requestContext.http.sourceIp` de API Gateway HTTP API v2, sin
-fallback a X-Forwarded-For. User-Agent se conserva raw con búsqueda de header
-insensible a mayúsculas. Ausencias se guardan como `null`. No se copian destinatario,
-asunto ni contenido al evento. EMAIL mantiene CREATED; no hay contadores ni deduplicación.
-
-| Condición                              | Respuesta                 | Escritura OPEN           |
-| -------------------------------------- | ------------------------- | ------------------------ |
-| UUID ausente o inválido                | 400 `INVALID_TRACKING_ID` | Ninguna                  |
-| UUID válido sin EMAIL                  | 404 `NOT_FOUND`           | Ninguna                  |
-| GetItem falla antes de confirmar EMAIL | 500 `SERVICE_UNAVAILABLE` | Ninguna                  |
-| EMAIL existe y PutItem funciona        | 200 `image/png`           | Evento independiente     |
-| EMAIL existe y PutItem falla           | **200 `image/png`**       | Puede perderse el evento |
-
-**Política de resiliencia:** solo tras confirmar EMAIL se tolera un fallo de
-persistencia. Se registra `OPEN_WRITE_FAILED` con requestId, trackingId, eventId,
-eventType y `persistenceSuccess=false`, sin error AWS, stack trace, IP, User-Agent
-ni secretos. El destinatario recibe el mismo PNG que en éxito. Se acepta perder
-ese evento; no hay colas, reintentos de aplicación ni tareas en segundo plano.
-La Lambda usa un intento SDK por operación y timeouts de conexión de 500 ms y
-petición de 1500 ms con rechazo al vencer, inferiores al timeout Lambda de 10 s.
-GetItem fallido nunca se interpreta como existencia ni como ausencia del EMAIL.
-No hay transacción entre lectura y escritura.
-
-El PNG RGBA transparente de 1x1 está precomputado en `pixel.ts`. La respuesta proxy
-Lambda contiene body base64 e `isBase64Encoded: true`; HTTP API lo entrega como
-bytes PNG al cliente. No se genera la imagen por request. Headers:
-
-```http
-Content-Type: image/png
-Cache-Control: no-store, no-cache, must-revalidate, max-age=0
-Pragma: no-cache
-Expires: 0
-```
-
-La Lambda dedicada `OpenTrackingFunction` recibe solo `TRACKING_TABLE_NAME` y tiene
-GetItem/PutItem sobre EmailTracking y escritura en su grupo de logs. No tiene acceso
-a licencias ni Secrets Manager, Scan, Query, UpdateItem o DeleteItem. No se añaden
-tablas, dominio personalizado, Route53, ACM, CloudFront o servicios externos.
-
-Una carga significa **Apertura detectada**, no prueba de lectura humana. IP y
-User-Agent pueden corresponder a proxies; Gmail puede cachear imágenes, Apple Mail
-puede precargarlas y otros clientes pueden bloquearlas. Los headers anti-cache no
-garantizan que un proxy solicite el pixel en cada apertura. El Milestone 12 añade geolocalización y parsing de navegador/sistema/dispositivo; no añade detección de proxies.
-El Milestone 10 inserta el pixel en Gmail después de crear tracking y antes de reanudar Send.
-
-### Validación local del pixel (sin AWS)
-
-```sh
-npm run build
-npm run lint
-npm test
-npm run format:check
-npm run synth --workspace=@email-tracker/cdk -- --no-lookups
-```
-
-Vitest comprueba firma PNG, CRC de chunks, dimensiones 1x1, datos RGBA con alpha 0,
-base64 y headers; verifica 400/404/500, cinco eventos simultáneos independientes y
-que un fallo PutItem devuelve exactamente el mismo 200 PNG y genera log seguro.
-DynamoDB está mockeado. CDK synth no despliega recursos. No se incluye servidor
-local HTTP ni se realizan tests E2E.
-
-### Validación opcional con AWS — no ejecutada automáticamente
-
-1. Desplegar `EmailTrackerActivation` con el flujo de deployment documentado arriba.
-   Añade la Lambda del pixel, su rol/logs y la ruta pública a la API existente.
-2. Crear licencia con el CLI existente (`--write` sobre LicenseTableName).
-3. Activar la extensión u obtener JWT con `POST /api/activate`.
-4. Crear EMAIL con `POST /api/tracking` y Bearer, usando el ejemplo anterior.
-5. Copiar `trackingId` y usar el output `ApiUrl` como `API_BASE_URL`. No hace falta
-   Authorization para el pixel:
-
-```sh
-curl -i "$API_BASE_URL/o/$TRACKING_ID" --output /tmp/pixel-response.http
-# Alternativa para inspeccionar headers y conservar solo PNG en un archivo:
-curl -D - "$API_BASE_URL/o/$TRACKING_ID" --output /tmp/tracking-pixel.png
-```
-
-6. Comprobar HTTP 200, Content-Type image/png y headers anti-cache. Cada uno de los
-   dos comandos anteriores es una carga independiente.
-7. Revisar DynamoDB: `PK=TRACKING#{trackingId}` y
-   `SK=OPEN#{openedAt}#{eventId}`, además del EMAIL existente.
-8. Repetir llamadas varias veces y comprobar varios eventos OPEN con distintos IDs.
-   La IP observada puede ser la del proxy/red de salida del cliente usado para curl.
-
-No se despliega AWS ni se configura el dominio de producción durante la validación local.
-
-## Milestone 8: consulta protegida e historial
-
-`GET /api/tracking/{trackingId}` requiere `Authorization: Bearer <JWT>`.
-La Lambda dedicada `getTracking.handler` reutiliza `createAuthorization` y
-`verifyToken`: verifica firma, expiración, issuer, audience, licenseId e
-installationId. La autorización se ejecuta en Lambda, no en un authorizer de API
-Gateway. La ruta nunca entrega metadata sin JWT válido. Los JWT emitidos siguen
-siendo válidos hasta expirar aunque se revoque posteriormente la licencia.
-
-El handler valida el UUID exclusivamente desde pathParameters y lo normaliza a
-minúsculas. `GetTrackingService` hace GetItem de EMAIL, valida ownership por
-**licenseId** y después consulta eventos. Otra instalación autorizada de la misma
-licencia puede consultar. EMAIL inexistente y EMAIL de otra licencia producen
-exactamente **404 `NOT_FOUND`**: así no se revela si existe un recurso ajeno y no
-se leen sus OPEN. UUID inválido produce 400 `INVALID_TRACKING_ID` sin DynamoDB;
-JWT ausente, inválido o expirado produce 401 `UNAUTHORIZED`; fallos internos,
-500 `SERVICE_UNAVAILABLE` sin detalles. La validación del UUID precede al JWT.
-
-`TrackingRepository.listOpenEvents` usa Query sobre la tabla existente:
-
-```text
-PK = TRACKING#{trackingId} AND begins_with(SK, OPEN#)
-ScanIndexForward = true
-ConsistentRead = true
-```
-
-GetItem también es consistente. Se conserva el orden natural ascendente del SK
-`OPEN#{openedAt}#{eventId}`, sin ordenar en memoria. El repositorio sigue
-LastEvaluatedKey hasta completar todas las páginas: no hay límite deliberado ni
-paginación visible. Una consulta normal requiere GetItem + Query; historiales
-superiores a una página requieren más Query. No usa Scan ni escribe EMAIL.
-La operación queda aislada para incorporar paginación posteriormente. Las lecturas
-no forman un snapshot transaccional: aperturas concurrentes pueden aparecer en
-esta consulta o en la siguiente. Historias muy grandes siguen sujetas a límites
-de tiempo/tamaño de Lambda y API Gateway; no se devuelve un historial parcial
-como exitoso si falla una página.
-
-Respuesta **200**, con `Cache-Control: no-store`:
-
-```json
-{
-  "trackingId": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "OPEN_DETECTED",
-  "recipient": "client@example.com",
-  "subject": "Technical Interview Follow-up",
-  "createdAt": "2026-09-24T20:15:00.000Z",
-  "openCount": 1,
-  "firstOpenedAt": "2026-09-24T20:20:00.000Z",
-  "lastOpenedAt": "2026-09-24T20:20:00.000Z",
-  "events": [
-    {
-      "eventId": "8a73e54e-c33f-40ca-a2dc-06626851744d",
-      "openedAt": "2026-09-24T20:20:00.000Z",
-      "ip": "192.0.2.1",
-      "userAgent": "Raw mail client User-Agent"
-    }
-  ]
-}
-```
-
-Sin OPEN: `status=CREATED`, `openCount=0`, `firstOpenedAt=null`,
-`lastOpenedAt=null`, `events=[]`. Con OPEN: `status=OPEN_DETECTED`,
-`openCount=events.length`, primera y última fecha tomadas del primer y último
-evento. IP y User-Agent pueden ser null y solo se entregan al dueño autorizado.
-No se devuelven claves DynamoDB ni identidades internas. Los eventos son la fuente
-de verdad; no se guarda contador redundante ni se introduce SENT. Apertura
-detectada no prueba lectura humana.
-
-Los contratos Zod y tipos compartidos incluyen `TrackingStatus`,
-`TrackingOpenEventResponse` y `GetTrackingResponse`.
-`createTrackingClient().getTracking(trackingId)` obtiene el token desde storage,
-usa la configuración API existente, envía Bearer y valida la respuesta. No hace
-fetch sin autorización local vigente. Mapea 401 a reactivación, 404 a tracking no
-encontrado y errores de red a indisponibilidad. Desde Milestone 11 el popup lo consume
-al seleccionar un tracking o pulsar Refresh, mediante mensajes al worker; no hay polling.
-
-CDK añade una Lambda, grupo de logs, rol e integración dedicados. El rol solo
-permite GetItem/Query sobre EmailTracking, GetSecretValue sobre el secreto JWT
-y escritura en sus logs; no permite Scan, escrituras DynamoDB ni acceso a licencias.
-Los logs contienen requestId, trackingId y resultado, nunca JWT, IP/User-Agent,
-destinatario, asunto o errores internos. No se añaden tablas ni dominios.
-
-El Milestone 12 añade geolocalización y parsing de navegador/OS/dispositivo. No hay detección de proxies
-o Apple MPP, Outlook,
-link tracking ni dashboard.
-
-### Validación del Milestone 8 sin AWS
-
-```sh
-npm run build
-npm run lint
-npm test
-npm run format:check
-npm run synth --workspace=@email-tracker/cdk -- --no-lookups
-```
-
-Tests unitarios Vitest con DynamoDB, JWT, storage y fetch mockeados; la suite
-existente además valida JWT reales con claves de prueba. No hay tests E2E ni AWS
-real. Carga la extensión compilada en Chrome/Edge y verifica que el popup y el
-checkbox no inician consultas de historial.
-
-### Validación opcional del Milestone 8 con AWS
-
-Solo después de autorización explícita, desplegar el stack con el flujo anterior,
-crear licencia, obtener JWT con POST /api/activate y crear un tracking con
-POST /api/tracking. Usar el output ApiUrl como API_BASE_URL, el token como TOKEN y
-el UUID devuelto como TRACKING_ID. Consultar antes de cargar el pixel debe devolver
-CREATED, cero eventos y fechas null.
-
-```sh
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE_URL/api/tracking/$TRACKING_ID"
-# Ejecutar varias veces para generar eventos independientes:
-curl "$API_BASE_URL/o/$TRACKING_ID" --output /tmp/tracking-pixel.png
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE_URL/api/tracking/$TRACKING_ID"
-```
-
-Verificar OPEN_DETECTED, openCount igual al número de eventos, historial ascendente,
-firstOpenedAt/lastOpenedAt y metadata. Probar JWT de otra licencia: 404 idéntico al
-UUID inexistente. Otro dispositivo de la misma licencia debe recibir 200. Sin
-Bearer: 401; UUID inválido: 400. No se despliega automáticamente.
-
-## Milestone 9: Gmail Send y creación de tracking
-
-Send con Track ON se detiene temporalmente para extraer primer To válido y asunto,
-llamar POST /api/tracking desde el service worker y asociar la respuesta al compose
-en memoria. Después se reanuda el botón nativo. OFF pasa sin API; errores o espera
-superior a 20 segundos reanudan sin tracking con un warning fijo. El JWT no cruza
-al content script. El Milestone 10 añade el pixel al final del editor antes de reanudar
-Send, preservando contenido y firma; el asunto no se modifica.
-
-Ver [documentación de la extensión](apps/extension/README.md#milestone-9-crear-tracking-antes-de-send-en-gmail)
-para interceptación, reanudación, duplicados, destinatarios múltiples, limitaciones
-DOM y validación manual OFF/ON/error en Chrome. Los tests son unitarios con mocks;
-no se validó una sesión Gmail real ni se desplegó AWS. Sin infraestructura nueva.
-
-## Milestone 10: pixel en el compose de Gmail
-
-Se valida la trackingUrl recibida (HTTPS y ruta `/o/`), se añade un img 1x1 con
-`data-email-tracker-id` al final del body mediante appendChild y se verifica antes
-de reanudar Send. El contexto existente y el DOM evitan duplicados en reintentos.
-Body ausente o fallo de inserción producen warning y envío sin tracking; puede
-quedar un registro CREATED sin pixel. No hay cambios ni deployment de AWS.
-
-Consultar [inserción y validación manual obligatoria](apps/extension/README.md#milestone-10-insertar-el-pixel-antes-de-reanudar-send).
-La aceptación sigue pendiente de comprobar Gmail real en Chrome/Edge y el HTML
-recibido con AWS desplegado. Un OPEN no demuestra lectura humana.
-
-## Milestone 11: historial básico en el popup
-
-El worker guarda metadata mínima de cada tracking creado con éxito en
-chrome.storage.local: trackingId, recipient, subject y createdAt. Mantiene los
-100 más recientes, sin duplicados, asociados a la instalación. Un fallo de
-persistencia local no bloquea el pixel ni Send. No se guardan eventos OPEN,
-IP, User-Agent, cuerpo o JWT en los registros de historial.
-
-Con Activated, el popup muestra listado, selección y detalle. Las consultas usan
-popup → mensajes → worker → GET existente, con Back y Refresh manual. DynamoDB
-sigue siendo fuente de verdad de aperturas. CREATED se muestra como Not opened
-yet; OPEN_DETECTED como Open detected. Hay estados de loading, 401, 404 y error
-de red, sin polling ni reactivación automática. El worker también gestiona
-activación para mantener el JWT fuera del popup/content script.
-
-Ver [documentación y validación manual](apps/extension/README.md#milestone-11-listado-y-detalle-en-el-popup).
-Sin endpoints nuevos, cambios de infraestructura ni despliegue AWS. Las pruebas
-unitarias son offline; Gmail/Chrome/Edge con AWS requieren validación manual.
-
-## Milestone 12: enriquecimiento de aperturas
-
-Cada OPEN conserva `eventId`, `trackingId`, `eventType`, `openedAt`, `ip` y
-`userAgent` raw y añade `country`, `region`, `city`, `browser`,
-`browserVersion`, `os` y `deviceType`. La clave sigue siendo
-`TRACKING#{trackingId}` / `OPEN#{openedAt}#{eventId}`; EMAIL no cambia.
-GET devuelve los nuevos campos para cada evento. Los históricos sin esos campos
-se normalizan a `null` para geo/versión y `Unknown` para navegador/OS/dispositivo;
-se aceptan también valores null explícitos. Device type solo admite Desktop,
-Mobile, Tablet y Unknown.
-
-El popup muestra ciudad, región y país disponibles bajo “Approximate location”,
-o “Location unavailable”, y navegador · OS · dispositivo, o “Unknown device”.
-IP sigue siendo un detalle independiente. No hay coordenadas, GPS, domicilio,
-mapas ni ubicación exacta. La IP y el User-Agent pueden pertenecer a un proxy;
-ubicación, navegador y dispositivo pueden ser aproximados o incorrectos.
-Un evento sigue significando **Open detected**, nunca prueba de lectura humana.
-No se añade detección específica de proxies ni de Apple Mail Privacy Protection.
-
-### GeoLite2 local en Lambda
-
-Se utiliza [maxmind](https://github.com/runk/node-maxmind) para leer el formato
-binario GeoLite2-City MMDB, sin servicios HTTP. Para este MVP se empaqueta la DB
-con el código Lambda: no requiere S3 en runtime, Layer, secretos adicionales ni
-permisos IAM nuevos. El pipeline actual comparte un asset entre las cuatro
-Lambdas; la DB aumenta ese asset, pero solo la Lambda del pixel la carga.
-El lector se inicializa de forma diferida y se comparte entre solicitudes del
-mismo runtime (incluidas solicitudes concurrentes). No se relee por evento. La espera asíncrona de geo tiene un límite de un segundo para preservar tiempo para guardar OPEN y responder el pixel; un resultado tardío no modifica el evento.
-Las IPs inválidas, privadas, loopback, link-local y multicast se omiten, también
-IPv4 privadas representadas como IPv6 mapped. Las IP públicas IPv4/IPv6 se
-consultan y los resultados parciales son válidos. Se prefieren nombres en español,
-con fallback a inglés.
-
-1. Crear una cuenta en [MaxMind GeoLite](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
-   y descargar **GeoLite2 City, formato MMDB** desde el portal autenticado.
-2. Extraer `GeoLite2-City.mmdb` fuera del repositorio. Si se usa una license key
-   para descargar, mantenerla en la configuración privada de la herramienta de
-   descarga; nunca en Git, código, extensión ni variables del stack.
-3. Compilar desde la raíz con una ruta absoluta (sin credenciales):
-
-   ```bash
-   GEOLITE2_CITY_DB_PATH=/ruta/privada/GeoLite2-City.mmdb npm run build
-   npm run synth --workspace=@email-tracker/cdk -- --no-lookups
-   ```
-
-   El build copia la DB a `services/tracking-api/build/lambda/GeoLite2-City.mmdb`.
-   CDK empaqueta ese directorio y configura el pixel con
-   `GEOLITE2_CITY_DB_PATH=/var/task/GeoLite2-City.mmdb`. No despliega.
-   Una ruta fuente configurada pero ilegible hace fallar el build.
-
-4. Para actualizar, descargar una DB nueva, sustituir el archivo externo,
-   repetir build/synth y desplegar solo con autorización. No hay actualización
-   automática. Mantener actualizada la DB según las condiciones de MaxMind
-   (su documentación exige retirar bases antiguas dentro de los 30 días de una
-   nueva publicación). No publicar el asset con la base como descarga pública.
-
-Este producto utiliza datos GeoLite2 creados por MaxMind, disponibles en
-[MaxMind](https://www.maxmind.com). Los archivos `*.mmdb` se excluyen de Git.
-Sin la variable de build, la compilación funciona sin DB y elimina una copia
-anterior del asset para evitar reutilizarla accidentalmente. En ese modo se
-obtienen aperturas con UA pero sin geo; **es necesario aportar la DB para obtener
-geolocalización real**. Los tests usan mocks, no descargan bases ni credenciales.
-El tamaño, memoria y tiempo de carga con la DB real deben comprobarse antes del
-despliegue; la validación local sin base no mide ese coste.
-
-### User-Agent y resiliencia
-
-Se utiliza [ua-parser-js v1](https://docs.uaparser.dev/v1/) (MIT), solo en backend:
-evita mantener expresiones regulares propias para navegador, versión, OS y
-móviles/tablets. Desktop se asigna cuando no hay otro tipo y el parser reconoce
-un OS de escritorio; entradas vacías/desconocidas dan Unknown. El User-Agent raw
-permanece intacto. Un fallo del parser no borra la geolocalización y viceversa.
-
-Tras validar que existe EMAIL, se obtiene timestamp y metadata, se intenta cada
-enriquecimiento y se persiste OPEN. Una excepción de lectura/lookup GeoLite2 o
-parsing genera un warning JSON con categoría fija e identificadores, sin IP,
-User-Agent ni mensaje privado del proveedor. El OPEN conserva los datos parciales
-y el handler devuelve 200 PNG. Una carga fallida de DB se recuerda en ese runtime
-para evitar lecturas repetidas; un nuevo runtime/despliegue permite reintentar.
-Si falla PutItem también se mantiene 200 PNG para tracking existente, aunque se
-pierde ese evento, como en Milestone 7. IDs inválidos/inexistentes conservan su
-política previa. No se modifican autorización, tablas ni permisos IAM.
-
-### Validación del Milestone 12
-
-```bash
-npm run build
-npm run lint
-npm test
-npm run format:check
-npm run synth --workspace=@email-tracker/cdk -- --no-lookups
-```
-
-Solo tests unitarios Vitest: validación IPv4/IPv6, exclusión de IPs locales,
-lookup completo/parcial/ausente, caché y fallos; parsing de navegadores y tipos
-de dispositivo; persistencia con fallos independientes o simultáneos; contratos
-históricos/enriquecidos, popup y empaquetado. No hay E2E ni polling.
-
-Validación manual opcional con AWS (no ejecutada automáticamente):
-
-1. Aportar la DB, compilar, revisar synth y desplegar el stack autorizado.
-2. Recargar la extensión compilada en Chrome o Edge, activar y enviar desde
-   Gmail un correo con Track email habilitado.
-3. Abrir el correo con imágenes habilitadas; consultar el detalle desde el popup
-   y pulsar Refresh. Comprobar ubicación aproximada y navegador/OS/dispositivo.
-4. Consultar GET autenticado y comprobar los siete campos nuevos por evento;
-   revisar OPEN en DynamoDB y verificar que `userAgent` raw sigue presente.
-5. Comparar un evento histórico: debe responder sin errores y mostrar los
-   fallbacks. En una prueba sin DB, verificar OPEN y PNG aunque geo sea null;
-   revisar el warning estructurado sin metadata sensible.
-
-Gmail puede devolver metadata de su proxy o cachear la imagen: no exigir que la
-ciudad/dispositivo coincidan con los del destinatario ni un evento por lectura.
+Sustituir `TABLE_NAME` por el output `LicenseTableName`, `REGION` por la región
+real y `LICENSE_ID` por `lic_<UUID>` generado. `--region` es opcional si ya está
+configurada. Create admite `--expires-at` con fecha futura, por ejemplo ISO UTC.
+Se conserva el comando create anterior, sin subcomando obligatorio.
+
+- **Create:** genera 192 bits aleatorios, muestra el código una sola vez y solo
+  persiste su SHA-256. Crea lookup/licencia atómicamente, `ACTIVE`, `maxDevices`,
+  `activeDevices=0`, `createdAt`. Sin `--write` no contacta AWS. No redirigir su
+  salida a logs/archivos; entregar el código por un canal privado. No hay recuperación
+  del código desde su hash. Un fallo de escritura no muestra el código.
+- **List:** imprime un JSON por licencia con licenseId, status, maxDevices,
+  activeDevices, createdAt y expiresAt si existe. Usa **Scan administrativo**
+  paginado (100 elementos evaluados por petición); sigue incluso páginas filtradas
+  vacías. La tabla no tiene una partición global ni GSI de licencias. Scan lee
+  también lookup/instalaciones; el filtro/proyección no reduce la capacidad leída.
+  Para un MVP pequeño es aceptable bajo demanda; no ejecutarlo periódicamente ni
+  asumir orden o snapshot consistente durante cambios concurrentes. No se concede
+  Scan a Lambdas ni a la extensión.
+- **Revoke:** sin `--write` describe el cambio sin llamadas AWS. Con flag hace un
+  Update condicionado a existencia y cambia únicamente `status=REVOKED`; conserva
+  historial, hash, lookup, contadores e instalaciones. Repetir devuelve REVOKED.
+  Una licencia inexistente produce error, nunca se crea accidentalmente.
+- **Installations:** verifica existencia con GetItem consistente y usa Query
+  paginado dentro de `LICENSE#<id>`. Muestra installationId, activatedAt, lastSeenAt
+  y status almacenado. Una instalación puede seguir diciendo ACTIVE aunque su
+  licencia esté REVOKED: el estado efectivo depende de la licencia. No libera cupos.
+
+List/installations/revoke no muestran hashes, códigos ni JWT. Las listas terminan
+con `Complete: N ...`; si hay error tras una página, la salida previa es parcial y
+el proceso termina con código 1, sin mensaje Complete. Errores distinguen argumentos,
+licencia/tabla ausente, autenticación AWS, permisos y red, sin stack traces ni detalles
+sensibles. Tras timeout de una escritura, comprobar list antes de asumir que no ocurrió;
+revoke puede repetirse. No se ofrece retry automático de create que genere otra licencia.
+
+Permisos del **administrador**, solo sobre la tabla de licencias: create necesita
+`dynamodb:PutItem` (los dos Put transaccionales); list `dynamodb:Scan`; revoke
+`dynamodb:UpdateItem`; installations `dynamodb:GetItem` y `dynamodb:Query`.
+No requiere leer Secrets Manager. El CLI no crea permisos ni usa credenciales en la extensión.
+
+## Datos y seguridad
+
+| Tabla / registro       | PK                      | SK                           |
+| ---------------------- | ----------------------- | ---------------------------- |
+| Licencias: lookup      | `CODE#<sha256>`         | `LOOKUP`                     |
+| Licencias: licencia    | `LICENSE#<licenseId>`   | `LICENSE`                    |
+| Licencias: instalación | `LICENSE#<licenseId>`   | `INSTALLATION#<uuid>`        |
+| Tracking: correo       | `TRACKING#<trackingId>` | `EMAIL`                      |
+| Tracking: apertura     | `TRACKING#<trackingId>` | `OPEN#<timestamp>#<eventId>` |
+
+Activation usa lecturas consistentes y transacciones condicionadas a licencia activa,
+expiración y cupos; reactivación actualiza lastSeenAt sin consumir otro cupo.
+No hay TTL de borrado de licencias ni liberación automática de dispositivos.
+Fechas descriptivas ISO UTC; expiresAt e iat/exp en segundos epoch.
+
+JWT HS256 con issuer/audience y claims licenseId, installationId, iat y exp.
+Firma verificada en cada API protegida; consulta restringida a la licencia propietaria.
+Secrets Manager genera y custodia la clave; roles Lambda con permisos específicos.
+Duración máxima/default 24 horas, limitada por expiresAt de licencia. El worker guarda
+el JWT en `chrome.storage.local` restringido a contextos confiables; el popup solo
+recibe estado y los content scripts no reciben tokens. El UUID no es una prueba
+criptográfica del dispositivo; reinstalar puede consumir otro cupo.
+
+**Revocar bloquea nuevas activaciones y reactivaciones, pero no invalida JWT ya
+emitidos:** POST/GET tracking no consultan estado de licencia y pueden autorizarlos
+hasta `exp`. El popup puede seguir Activated. No hay blacklist distribuida ni
+renovación automática. Revoke no bloquea el pixel público de correos anteriores.
+
+Los logs estructurados no guardan código, JWT, secreto, cuerpo, destinatario ni
+User-Agent/IP raw; esos últimos pueden estar en eventos DynamoDB, no en logs.
+No se almacenan contraseñas, cookies ni tokens de Gmail/Outlook, cuerpo ni adjuntos.
+No subir `.env` con secretos, MMDB, capturas de Authorization ni salidas create a Git.
+Tablas, secreto y logs se retienen al retirar el stack; logs con retención de un mes.
+No hay borrado automático de eventos ni herramientas de exportación/borrado en este MVP.
+
+## Privacy y limitaciones
+
+Gmail image proxy, Apple Mail Privacy Protection, caché, proxies corporativos,
+VPN, bloqueo de imágenes, antivirus/security scanners y prefetching alteran las
+solicitudes del pixel. Incluso cargar el pixel en el compose del remitente puede
+registrar OPEN. **openCount puede ser mayor o menor que las aperturas humanas**;
+múltiples aperturas pueden no producir nuevas requests. IP, ubicación, navegador,
+OS y dispositivo pueden pertenecer al proxy, no al destinatario. Ubicación es
+aproximada y no identifica a una persona; no hay detección automática de proxies.
+
+GeoLite2 es opcional; sin MMDB válida o con IP no localizable, se muestra ubicación
+no disponible. UA desconocido produce Unknown. Eventos históricos sin esos campos
+siguen siendo consultables con valores desconocidos. La DB no se descarga ni se
+actualiza automáticamente. Este producto utiliza datos GeoLite2 creados por MaxMind,
+disponibles en [MaxMind](https://www.maxmind.com); revisar los términos de su cuenta
+antes de incorporar/distribuir la DB. No versionar binarios ni claves de MaxMind.
+
+DynamoDB conserva todos los eventos. El historial reciente del popup contiene
+solo los últimos 100 tracking creados en esa instalación; se pierde al borrar
+storage/desinstalar, no sincroniza dispositivos ni recupera creaciones anteriores.
+El detalle se consulta con selección/Refresh, sin polling. No hay paginación del
+historial de eventos en la API MVP; grandes historiales pueden exceder límites de
+respuesta. No hay notificaciones, analytics, link/attachment tracking, campañas,
+billing, SaaS dashboard, equipos, SSO ni aplicaciones móviles.
+
+## Deployment, smoke testing y troubleshooting
+
+- [Runbook de deployment y operación](docs/operations.md): orden completo desde
+  AWS CLI y cuenta/región hasta dominio, licencia, observabilidad y revocación.
+- [Checklist reusable de smoke testing](docs/smoke-test.md): ejecutar manualmente
+  en Chrome/Edge con Gmail/Outlook, registrar resultados y evidencias sin secretos.
+- [Troubleshooting](docs/troubleshooting.md): causas probables y diagnóstico.
+
+Para una revisión local sin AWS, inspeccionar `dist/manifest.json`, cargar
+`apps/extension/dist` en Chrome/Edge y comprobar detección de compose, Track OFF y
+fallback si el backend está ausente. No demuestra activación ni seguimiento real.
+El runbook y checklist completos quedan pendientes; ninguna operación AWS, DNS,
+certificado real o envío real se realizó como parte del Milestone 15.

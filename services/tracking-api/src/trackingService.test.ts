@@ -52,3 +52,22 @@ it('does not return success when persistence fails', async () => {
     ),
   ).rejects.toThrow('DynamoDB internal');
 });
+
+it('creates the production pixel URL from backend configuration without duplicate slashes', async () => {
+  const { readTrackingConfig } = await import('./trackingConfig.js');
+  for (const override of [undefined, 'https://tracking.cesaragudelo.com/']) {
+    const config = readTrackingConfig({
+      TRACKING_TABLE_NAME: 'test',
+      JWT_SECRET_ARN: 'test',
+      TRACKING_BASE_URL: override,
+    });
+    const service = new TrackingService(
+      { create: vi.fn().mockResolvedValue(undefined) },
+      config.TRACKING_BASE_URL,
+    );
+    const result = await service.create(identity, request);
+    expect(result.trackingUrl).toBe(
+      `https://tracking.cesaragudelo.com/o/${result.trackingId}`,
+    );
+  }
+});
